@@ -1,0 +1,13 @@
+[package]
+name = "auto-runs-contracts"
+version = "0.1.0"
+edition = "2021"
+license = "0BSD"
+
+[lib]
+name = "auto_runs_contracts"
+path = "src/lib.rs"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
