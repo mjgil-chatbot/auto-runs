@@ -1,0 +1,4 @@
+/.lake/
+/aeneas-check/.lake/
+/aeneas-check/auto_runs_aeneas_model.llbc
+/aeneas-check/AutoRunsExtract/Generated/FunsExternal_Template.lean
