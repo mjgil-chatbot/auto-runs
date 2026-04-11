@@ -1,5 +1,7 @@
 use std::io::Write;
+
 use super::*;
+
 pub(super) fn resolve_scope_files(
     root: &Path,
     scope: &ReviewScope,
@@ -98,9 +100,11 @@ pub(super) fn resolve_scope_files(
         }
     }
 }
+
 fn normalize_glob_pattern(pattern: &str) -> String {
     pattern.trim().replace('\\', "/")
 }
+
 fn glob_matches_path(pattern: &str, path: &str) -> bool {
     let pattern_segments = pattern
         .split('/')
@@ -112,6 +116,7 @@ fn glob_matches_path(pattern: &str, path: &str) -> bool {
         .collect::<Vec<_>>();
     glob_segments_match(&pattern_segments, &path_segments)
 }
+
 fn glob_segments_match(pattern: &[&str], path: &[&str]) -> bool {
     if pattern.is_empty() {
         return path.is_empty();
@@ -127,6 +132,7 @@ fn glob_segments_match(pattern: &[&str], path: &[&str]) -> bool {
 
     glob_segments_match(&pattern[1..], &path[1..])
 }
+
 fn glob_component_matches(pattern: &str, text: &str) -> bool {
     let pattern = pattern.as_bytes();
     let text = text.as_bytes();
@@ -158,6 +164,7 @@ fn glob_component_matches(pattern: &str, text: &str) -> bool {
 
     pattern_idx == pattern.len()
 }
+
 fn collect_reviewable_files(root: &Path, current: &Path) -> Result<Vec<String>> {
     let mut files = Vec::new();
     for entry in
@@ -182,6 +189,7 @@ fn collect_reviewable_files(root: &Path, current: &Path) -> Result<Vec<String>> 
     }
     Ok(files)
 }
+
 fn filter_gitignored_paths(root: &Path, files: Vec<String>) -> Result<Vec<String>> {
     if files.is_empty() {
         return Ok(files);
@@ -229,12 +237,29 @@ fn filter_gitignored_paths(root: &Path, files: Vec<String>) -> Result<Vec<String
         .filter(|file| !ignored.contains(file.as_str()))
         .collect())
 }
+
 fn should_skip_dir(path: &Path) -> bool {
     matches!(
         path.file_name().and_then(|name| name.to_str()),
         Some(".git" | "target" | "node_modules" | "dist" | ".claude-desktop" | ".rag_model_cache")
     )
 }
+
+#[cfg(test)]
+pub(super) fn glob_matches_path_test(pattern: &str, path: &str) -> bool {
+    glob_matches_path(pattern, path)
+}
+
+#[cfg(test)]
+pub(super) fn should_skip_dir_test(path: &Path) -> bool {
+    should_skip_dir(path)
+}
+
+#[cfg(test)]
+pub(super) fn is_reviewable_path_test(path: &Path) -> bool {
+    is_reviewable_path(path)
+}
+
 fn is_reviewable_path(path: &Path) -> bool {
     // Filter out deleted files - only include paths that exist on disk
     path.exists()

@@ -31,6 +31,29 @@ use std::time::Duration;
 #[allow(unused_imports)]
 use uuid::Uuid;
 pub const DEFAULT_GENERATED_TASK_ESTIMATED_MINUTES: u32 = 15;
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinationTaskKind {
+    #[default]
+    SurveyWorkspace,
+    PlanCodeReview,
+    DraftDesignDoc,
+    ConvergeDesignDoc,
+    MaterializeDesignDoc,
+    PlanFlatTasks,
+    RalphPlan,
+    GeneratedReadTask,
+    GeneratedWriteTask,
+    ReviewArtifacts,
+    ApplyApprovedEdits,
+    RalphExecute,
+    RalphVerify,
+    PerfBaseline,
+    PerfParse,
+    PerfApply,
+    PerfBench,
+    PerfEvaluate,
+}
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CoordinationTaskOutcome {

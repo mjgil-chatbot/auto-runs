@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+
 use super::*;
+
 /// Builds review chunks and returns them alongside a content cache keyed by relative file path.
 /// The cache can be passed to [`dimensions_for_chunk_cached`] to avoid re-reading files from disk.
 pub(super) fn build_chunks_with_cache(
@@ -45,6 +47,12 @@ pub(super) fn build_chunks_with_cache(
     }
     Ok((chunks, cache))
 }
+
+/// Kept for tests that build chunks and dimensions independently.
+pub(super) fn build_chunks(root: &Path, files: &[String]) -> Result<Vec<Vec<ReviewChunkTarget>>> {
+    Ok(build_chunks_with_cache(root, files)?.0)
+}
+
 fn split_large_file(path: &str, contents: &str) -> Vec<ReviewChunkTarget> {
     let mut impl_boundaries = Vec::new();
     let lines: Vec<&str> = contents.lines().collect();
@@ -117,6 +125,7 @@ fn split_large_file(path: &str, contents: &str) -> Vec<ReviewChunkTarget> {
     }
     chunks
 }
+
 fn split_fixed_width(path: &str, total_lines: usize) -> Vec<ReviewChunkTarget> {
     let mut chunks = Vec::new();
     let mut start = 1usize;
@@ -131,6 +140,7 @@ fn split_fixed_width(path: &str, total_lines: usize) -> Vec<ReviewChunkTarget> {
     }
     chunks
 }
+
 /// Detects review dimensions using a pre-built content cache (no disk I/O).
 /// Use this with the cache returned by [`build_chunks_with_cache`].
 pub(super) fn dimensions_for_chunk_cached(
@@ -183,6 +193,24 @@ pub(super) fn dimensions_for_chunk_cached(
 
     Ok(dims.into_iter().collect())
 }
+
+/// Kept for tests that build dimensions without a pre-built cache.
+pub(super) fn dimensions_for_chunk(
+    root: &Path,
+    chunk: &[ReviewChunkTarget],
+    selected_dimensions: Option<&[String]>,
+) -> Result<Vec<String>> {
+    let cache: HashMap<String, String> = chunk
+        .iter()
+        .map(|target| {
+            fs::read_to_string(root.join(&target.path))
+                .with_context(|| format!("failed to read {}", target.path))
+                .map(|contents| (target.path.clone(), contents))
+        })
+        .collect::<Result<_>>()?;
+    dimensions_for_chunk_cached(&cache, chunk, selected_dimensions)
+}
+
 pub(super) fn build_chunk_title(index: usize, chunk: &[ReviewChunkTarget]) -> String {
     if chunk.len() == 1 {
         let target = &chunk[0];
@@ -194,6 +222,7 @@ pub(super) fn build_chunk_title(index: usize, chunk: &[ReviewChunkTarget]) -> St
         format!("Review chunk {}: {} files", index, chunk.len())
     }
 }
+
 pub(super) fn build_chunk_prompt(metadata: &ReviewTaskMetadata) -> String {
     let chunk_lines = metadata
         .chunk
@@ -247,6 +276,7 @@ pub(super) fn build_chunk_prompt(metadata: &ReviewTaskMetadata) -> String {
         metadata.scope_description, chunk_lines, dimensions, profile_status, checks, fix_mode
     )
 }
+
 pub(super) fn dimension_guidance(dimension: &str) -> &'static str {
     match dimension.trim().to_ascii_lowercase().as_str() {
         "architecture" => "Check the repo-specific invariants and cross-module contracts from the review profile.",

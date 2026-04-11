@@ -18,3 +18,12 @@ mod code_review;
 #[path = "parts/types.rs"]
 pub mod types;
 pub use types::*;
+#[path = "parts/artifacts.rs"]
+pub mod artifacts;
+pub use artifacts::*;
+#[path = "parts/generated_tasks.rs"]
+pub mod generated_tasks;
+pub use generated_tasks::*;
+#[path = "parts/task_contracts.rs"]
+pub mod task_contracts;
+pub use task_contracts::*;
