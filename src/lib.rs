@@ -6,4 +6,5 @@ pub use auto_runs_contracts::{
     is_generated_design_doc_path, AutonomousExecutionEnvironment, AutonomousWorkflowMode,
     ReviewFixMode, ReviewScope, TurnPolicy,
 };
+pub use chatbot_lib::model;
 pub mod coordination;

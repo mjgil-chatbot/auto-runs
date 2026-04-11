@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 #[path = "../code_review.rs"]
 mod code_review;
+pub mod council;
 #[path = "parts/types.rs"]
 pub mod types;
 pub use types::*;
