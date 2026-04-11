@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+echo "pre-commit: running cargo fmt --all"
+cargo fmt --all
+
+if ! git diff --quiet -- '*.rs'; then
+  echo "pre-commit: restaging formatted Rust files"
+  git add --update -- '*.rs'
+fi
+
+echo "pre-commit: running engineering gate"
+"$repo_root/scripts/verify-engineering-gate.sh"

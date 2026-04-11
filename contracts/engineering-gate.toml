@@ -1,0 +1,72 @@
+version = 1
+repo_id = "auto-runs"
+repo_root_names = ["auto-runs"]
+
+[[command_group]]
+id = "workflow_registry_checks"
+commands = [
+  "cargo test --release --test workflow_contracts",
+]
+
+[[command_group]]
+id = "coordination_runtime_checks"
+commands = [
+  "cargo test --release claim_next_runnable_task_appends_driver_context_when_status_matches -- --exact",
+  "cargo test --release load_run_snapshot_requeues_running_task_with_missing_claim -- --exact",
+  "cargo test --release verify_completion_accepts_clean_council_state -- --exact",
+]
+
+[[contract]]
+id = "engineering_docs"
+description = "Documentation and hook wiring changes must keep the repo-local gate coherent."
+trigger_globs = [
+  "docs/architecture/overview.md",
+  "docs/architecture/evidence-gate.md",
+  "docs/verification.md",
+  "contracts/engineering-gate.toml",
+  ".github/workflows/engineering-gate.yml",
+  ".githooks/pre-commit",
+  "scripts/install-hooks.sh",
+  "scripts/verify-engineering-gate.sh",
+  "scripts/verify_engineering_gate.py",
+  "scripts/verify-coordination-gate.sh",
+  "tests/test_engineering_gate.py",
+]
+commands = [
+  "python3 -m unittest tests.test_engineering_gate",
+]
+
+[[contract]]
+id = "workflow_registry"
+description = "Workflow registry changes must keep the checked workflow contract green and the docs in sync."
+trigger_globs = [
+  "src/workflow.rs",
+  "src/workflow/*.rs",
+  "src/workflow/**/*.rs",
+  "workflow-registry/**",
+  "tests/workflow_contracts.rs",
+]
+required_any_staged = [
+  "docs/verification.md",
+  "docs/architecture/overview.md",
+  "docs/architecture/evidence-gate.md",
+]
+command_groups = ["workflow_registry_checks"]
+
+[[contract]]
+id = "coordination_runtime"
+description = "Coordination and council repairs must keep the focused release regressions and docs aligned."
+trigger_globs = [
+  "src/coordination.rs",
+  "src/coordination/*.rs",
+  "src/coordination/**/*.rs",
+  "src/code_review.rs",
+  "src/code_review/*.rs",
+  "src/code_review/**/*.rs",
+]
+required_any_staged = [
+  "docs/verification.md",
+  "docs/architecture/overview.md",
+  "docs/architecture/evidence-gate.md",
+]
+command_groups = ["coordination_runtime_checks"]

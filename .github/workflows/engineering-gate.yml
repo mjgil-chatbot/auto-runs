@@ -1,0 +1,70 @@
+name: Engineering Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  engineering-gate:
+    runs-on: ubuntu-latest
+    env:
+      ENGINEERING_GATE_TARGET_SUFFIX: ci
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            libasound2-dev \
+            libgl1-mesa-dev \
+            libssl-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxinerama-dev \
+            libxkbcommon-dev \
+            libxrandr-dev \
+            mold \
+            pkg-config
+
+      - name: Resolve diff base
+        id: diff
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            base_sha="${{ github.event.pull_request.base.sha }}"
+          else
+            base_sha="${{ github.event.before }}"
+          fi
+
+          if [[ -z "${base_sha}" || "${base_sha}" == "0000000000000000000000000000000000000000" ]]; then
+            if git rev-parse HEAD^ >/dev/null 2>&1; then
+              base_sha="$(git rev-parse HEAD^)"
+            else
+              base_sha="$(git hash-object -t tree /dev/null)"
+            fi
+          fi
+
+          echo "base_sha=${base_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Run engineering gate
+        run: |
+          scripts/verify-engineering-gate.sh \
+            --diff-base "${{ steps.diff.outputs.base_sha }}" \
+            --diff-head HEAD
