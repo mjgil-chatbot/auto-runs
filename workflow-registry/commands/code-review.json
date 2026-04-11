@@ -1,0 +1,57 @@
+{
+  "name": "code-review",
+  "title": "Code Review",
+  "section": "coordination",
+  "order": 100,
+  "arguments": "[--scope <path|glob|diff>] [--dimensions <dim1,dim2,...>] [--fix-mode generate]",
+  "summary": "Run an autonomous code review of the workspace (or subset) using the coordination system with repo-specific review profile context. Produces severity-ordered findings with file:line references and optionally generates fix tasks for user approval.",
+  "when_to_use": [
+    "When you need to audit the codebase for architectural issues, risk zones, or cross-module contract violations",
+    "When you want automated review aligned with this repo's invariants and review profile",
+    "When you need a persistent review document with findings organized by severity",
+    "When you want optional fix generation for the identified issues"
+  ],
+  "inputs": [
+    {
+      "name": "scope",
+      "required": false,
+      "description": "Review scope: worktree (default), diff <base>, paths <glob>, or globs <pattern1,pattern2,...>"
+    },
+    {
+      "name": "dimensions",
+      "required": false,
+      "description": "Comma-separated review dimensions to apply: correctness, error-handling, concurrency, security, performance, maintainability, code_quality, comment_accuracy, test_coverage, type_design, simplification, architecture. Defaults to correctness + error-handling + concurrency + security + performance + maintainability."
+    },
+    {
+      "name": "fix_mode",
+      "required": false,
+      "description": "Whether to generate fix tasks: 'generate' creates fix tasks for user approval, 'report' (default) produces findings only."
+    }
+  ],
+  "context_files": [
+    "docs/boundary.md",
+    "docs/architecture/autonomous-coordination.md",
+    "src/code_review.rs",
+    "src/coordination/mod.rs",
+    "crates/auto-runs-contracts/src/lib.rs",
+    "workflow-registry/providers.json"
+  ],
+  "steps": [
+    "SurveyWorkspace: Run cargo check, cargo clippy, cargo test, cargo fmt --check to capture repo context",
+    "PlanCodeReview: Read survey artifact + review-profile.md + user-supplied scope, validate profile freshness (warn if >30 days stale), output ordered list of read-only ReviewArtifacts tasks",
+    "ReviewArtifacts (one per chunk, max 2000 LOC each): Apply selected dimensions with repo-specific criteria from review profile, output findings in JSON contract",
+    "Optional Fix Tasks: Only when fix_mode=generate, generate fix tasks requiring user approval",
+    "MaterializeDesignDoc: Aggregate all review artifacts into severity-ordered markdown document at docs/code-review-YYYY-MM-DD.md"
+  ],
+  "outputs": [
+    "Review document: docs/code-review-YYYY-MM-DD.md with severity-ordered findings and file:line references",
+    "Findings JSON contract from each ReviewArtifacts task",
+    "Optional fix tasks for user approval (when fix_mode=generate)"
+  ],
+  "examples": [
+    "/code-review",
+    "/code-review --scope worktree --dimensions correctness,error-handling,security",
+    "/code-review --scope diff main --fix-mode generate",
+    "/code-review --scope paths src/coordination/*.rs"
+  ]
+}

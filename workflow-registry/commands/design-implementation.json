@@ -1,0 +1,48 @@
+{
+  "name": "design-implementation",
+  "title": "Design Implementation",
+  "section": "coordination",
+  "order": 51,
+  "arguments": "<design-doc-path> [--providers <p1,p2,...>]",
+  "summary": "Takes an existing design document as input and implements it. Skips design convergence entirely; goes straight to survey, plan, execute, review, and apply. Distinct from design-consensus: this workflow assumes the design is already finalized.",
+  "when_to_use": [
+    "When you have a finalized design document and want to execute it autonomously",
+    "When the design phase is complete and you need structured implementation with review",
+    "When you want multi-provider implementation driven by an existing design artifact"
+  ],
+  "inputs": [
+    {
+      "name": "design-doc-path",
+      "required": true,
+      "description": "Path to the existing design document that drives implementation. Must be a finalized design artifact."
+    },
+    {
+      "name": "providers",
+      "required": false,
+      "description": "Comma-separated provider IDs for implementation tasks. Defaults to capability-routed selection."
+    }
+  ],
+  "context_files": [
+    "docs/architecture/overview.md",
+    "docs/architecture/autonomous-coordination.md",
+    "src/coordination/mod.rs",
+    "crates/auto-runs-contracts/src/lib.rs",
+    "workflow-registry/providers.json"
+  ],
+  "steps": [
+    "SurveyWorkspace: Gather repository context and validate the referenced design document exists",
+    "PlanImplementation: Break the design document into ordered implementation tasks with dependency edges",
+    "ExecuteTasks (parallelized where possible): Implement each planned task using capability-routed providers",
+    "ReviewImplementation: Cross-provider review of all changes against the original design contract",
+    "ApplyChanges: Materialize final implementation with verification against design acceptance criteria"
+  ],
+  "outputs": [
+    "Implementation changes applied to the workspace",
+    "Per-task execution artifacts and review findings",
+    "Implementation report documenting what was built and how it maps to the design"
+  ],
+  "examples": [
+    "/design-implementation docs/architecture/overview.md",
+    "/design-implementation docs/design-2026-04-01.md --providers claude,codex"
+  ]
+}

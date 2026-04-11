@@ -1,0 +1,46 @@
+{
+  "name": "freeform-council",
+  "title": "Freeform Council",
+  "section": "coordination",
+  "order": 60,
+  "arguments": "[--turn-policy <round_robin|mention_driven|adaptive>] [--max-turns <n>]",
+  "summary": "Open-ended multi-provider council session where providers collaborate through structured turns without a fixed workflow template. Supports round-robin, mention-driven, and adaptive turn policies for flexible multi-model collaboration.",
+  "when_to_use": [
+    "When you need open-ended multi-model discussion without a predetermined workflow structure",
+    "When exploring a problem space that does not fit a specific workflow template",
+    "When you want providers to collaborate freely with configurable turn-taking policies"
+  ],
+  "inputs": [
+    {
+      "name": "turn-policy",
+      "required": false,
+      "description": "Turn-taking policy: round_robin (default), mention_driven, or adaptive."
+    },
+    {
+      "name": "max-turns",
+      "required": false,
+      "description": "Maximum number of council turns before session ends. Defaults to coordination config value."
+    }
+  ],
+  "context_files": [
+    "docs/architecture/council-driver-recovery.md",
+    "docs/architecture/autonomous-coordination.md",
+    "src/coordination/mod.rs",
+    "crates/auto-runs-contracts/src/lib.rs",
+    "workflow-registry/providers.json"
+  ],
+  "steps": [
+    "InitializeCouncil: Set up multi-provider session with the selected turn policy",
+    "CouncilTurns (iterated): Providers take turns responding according to the turn policy until max turns or natural conclusion",
+    "MaterializeSummary: Produce a summary of the council discussion and any decisions reached"
+  ],
+  "outputs": [
+    "Council session transcript",
+    "Summary document with key decisions and action items"
+  ],
+  "examples": [
+    "/freeform-council",
+    "/freeform-council --turn-policy adaptive --max-turns 10",
+    "/freeform-council --turn-policy mention_driven"
+  ]
+}

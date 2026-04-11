@@ -1,0 +1,48 @@
+{
+  "name": "design-consensus",
+  "title": "Design Consensus",
+  "section": "coordination",
+  "order": 50,
+  "arguments": "[--providers <p1,p2,...>] [--turns <max>]",
+  "summary": "Multi-model convergence workflow that produces a design document as its terminal artifact. Multiple providers draft independently, then converge through structured critique rounds until consensus is reached. No implementation — stops after writing the canonical design doc.",
+  "when_to_use": [
+    "When you need a high-quality design document that benefits from multiple model perspectives",
+    "When architectural decisions require cross-validation across different reasoning styles",
+    "When you want a converged design doc before committing to implementation"
+  ],
+  "inputs": [
+    {
+      "name": "providers",
+      "required": false,
+      "description": "Comma-separated provider IDs to participate in consensus. Defaults to all providers with Design capability."
+    },
+    {
+      "name": "turns",
+      "required": false,
+      "description": "Maximum convergence turns before forcing materialization. Defaults to coordination config value."
+    }
+  ],
+  "context_files": [
+    "docs/architecture/overview.md",
+    "docs/architecture/autonomous-coordination.md",
+    "src/coordination/mod.rs",
+    "crates/auto-runs-contracts/src/lib.rs",
+    "workflow-registry/providers.json"
+  ],
+  "steps": [
+    "SurveyWorkspace: Gather repository context, file structure, and existing design artifacts",
+    "DraftDesignDoc (one per provider): Each provider independently drafts a design document section",
+    "ConvergenceRound (iterated): Providers critique and refine drafts until consensus criteria are met",
+    "MaterializeDesignDoc: Aggregate converged drafts into a single canonical design document"
+  ],
+  "outputs": [
+    "Canonical design document at docs/design-YYYY-MM-DD.md",
+    "Per-provider draft artifacts for audit trail",
+    "Convergence metadata showing rounds and consensus metrics"
+  ],
+  "examples": [
+    "/design-consensus",
+    "/design-consensus --providers claude,codex,gemini",
+    "/design-consensus --turns 3"
+  ]
+}

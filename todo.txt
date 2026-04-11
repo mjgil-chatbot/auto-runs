@@ -1,0 +1,13 @@
+fix auto runs so they are more consistent
+
+make real provider abstraction -- ai-providers
+  ---
+  fix binary installs to the container
+
+finalize ui
+  fix ui so it's better
+
+add other forms of auto-runs
+  https://gemini.google.com/app/2070d6f936f0c017
+
+auto-ui testing

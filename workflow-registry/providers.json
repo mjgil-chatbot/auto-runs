@@ -1,0 +1,181 @@
+{
+  "providers": [
+    {
+      "provider_id": "claude",
+      "model_override": "claude-opus-4-6[1m]",
+      "prompt_family": "principles",
+      "supported_categories": [
+        "survey",
+        "design",
+        "plan",
+        "deep_write",
+        "review",
+        "verify",
+        "doc_write",
+        "research"
+      ],
+      "preferred_categories": [
+        "design",
+        "deep_write",
+        "review",
+        "research"
+      ],
+      "fallback_chain": [
+        "codex",
+        "minimax",
+        "qwen"
+      ],
+      "cooldown_eligible": true,
+      "max_concurrency": 6,
+      "cost_tier": "premium",
+      "structured_output_mode": "provider_native_json_schema",
+      "notes": "Strong default for synthesis, high-context writing, and design consensus work."
+    },
+    {
+      "provider_id": "codex",
+      "model_override": "gpt-5.4",
+      "prompt_family": "mechanics",
+      "supported_categories": [
+        "survey",
+        "design",
+        "plan",
+        "deep_write",
+        "quick_write",
+        "review",
+        "verify",
+        "doc_write"
+      ],
+      "preferred_categories": [
+        "plan",
+        "deep_write",
+        "verify"
+      ],
+      "fallback_chain": [
+        "claude",
+        "minimax",
+        "qwen"
+      ],
+      "cooldown_eligible": true,
+      "max_concurrency": 6,
+      "cost_tier": "premium",
+      "structured_output_mode": "provider_native_json_schema",
+      "notes": "Best fit for explicit implementation prompts, stepwise execution, and repo-grounded verification."
+    },
+    {
+      "provider_id": "nemotron",
+      "model_override": "nvidia/nemotron-3-super-120b-a12b",
+      "prompt_family": "mechanics",
+      "supported_categories": [
+        "survey",
+        "design",
+        "plan",
+        "deep_write",
+        "quick_write",
+        "review",
+        "verify",
+        "doc_write"
+      ],
+      "preferred_categories": [
+        "deep_write",
+        "verify",
+        "quick_write"
+      ],
+      "fallback_chain": [
+        "codex",
+        "claude",
+        "minimax",
+        "qwen"
+      ],
+      "cooldown_eligible": true,
+      "max_concurrency": 4,
+      "cost_tier": "medium",
+      "structured_output_mode": "provider_native_json_schema",
+      "notes": "Nemotron uses the Codex-compatible path and fits implementation, verification, and document materialization work."
+    },
+    {
+      "provider_id": "gemini",
+      "model_override": "gemini-3-flash-preview",
+      "prompt_family": "principles",
+      "supported_categories": [
+        "survey",
+        "design",
+        "plan",
+        "review",
+        "verify",
+        "research",
+        "doc_write"
+      ],
+      "preferred_categories": [
+        "survey",
+        "design",
+        "review",
+        "verify",
+        "research"
+      ],
+      "fallback_chain": [
+        "claude",
+        "codex",
+        "qwen"
+      ],
+      "cooldown_eligible": true,
+      "max_concurrency": 2,
+      "cost_tier": "medium",
+      "notes": "Fast parallel analyst for research, review, and verification-heavy tasks."
+    },
+    {
+      "provider_id": "minimax",
+      "model_override": "MiniMax-M2.7",
+      "prompt_family": "mechanics",
+      "supported_categories": [
+        "survey",
+        "design",
+        "plan",
+        "quick_write",
+        "review",
+        "verify",
+        "doc_write"
+      ],
+      "preferred_categories": [
+        "quick_write",
+        "verify"
+      ],
+      "fallback_chain": [
+        "qwen",
+        "codex"
+      ],
+      "cooldown_eligible": true,
+      "max_concurrency": 4,
+      "cost_tier": "low",
+      "structured_output_mode": "provider_native_json_schema",
+      "notes": "Low-cost utility path for lighter drafting, fast checks, and spillover capacity."
+    },
+    {
+      "provider_id": "qwen",
+      "model_override": "qwen-3.6-free",
+      "prompt_family": "mechanics",
+      "supported_categories": [
+        "survey",
+        "design",
+        "plan",
+        "quick_write",
+        "review",
+        "verify",
+        "research"
+      ],
+      "preferred_categories": [
+        "quick_write",
+        "review",
+        "research"
+      ],
+      "fallback_chain": [
+        "minimax",
+        "codex",
+        "claude"
+      ],
+      "cooldown_eligible": true,
+      "max_concurrency": 2,
+      "cost_tier": "low",
+      "notes": "Fast secondary provider for research sweeps, lightweight reviews, and cheap fallback coverage."
+    }
+  ]
+}
