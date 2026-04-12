@@ -98,6 +98,79 @@ fn quarantine_missing_council_state(
     )?;
     Ok(())
 }
+fn ensure_seed_entries(council: &CouncilRun, ledger: &[CouncilEntry]) -> Result<Vec<CouncilEntry>> {
+    if !ledger.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut entries = Vec::new();
+    entries.push(CouncilEntry::new(
+        CouncilSpeaker::System,
+        CouncilEntryKind::SystemContext,
+        format!(
+            "Goal: {}\nCompletion criteria: {}",
+            council.goal.trim(),
+            council.completion_criteria.trim()
+        ),
+    ));
+
+    let survey = write_workspace_survey_artifact(council)?;
+    entries.push(CouncilEntry::new(
+        CouncilSpeaker::System,
+        CouncilEntryKind::SystemContext,
+        format!(
+            "Workspace survey attached: {}\n\n{}",
+            survey.summary, survey.body
+        ),
+    ));
+
+    Ok(entries)
+}
+fn write_workspace_survey_artifact(council: &CouncilRun) -> Result<coordination::TaskArtifact> {
+    let now = Utc::now();
+    let task = coordination::CoordinationTask {
+        provider_hint: None,
+        required_role: None,
+        task_category: None,
+        task_id: SURVEY_ARTIFACT_ID.to_string(),
+        run_id: council.run_id.clone(),
+        parent_task_id: None,
+        kind: coordination::CoordinationTaskKind::SurveyWorkspace,
+        assigned_provider: None,
+        iteration: None,
+        title: "Council workspace survey".to_string(),
+        prompt: String::new(),
+        cwd: council.workspace_path.clone(),
+        allowed_tools: Vec::new(),
+        read_scope: Vec::new(),
+        write_scope: Vec::new(),
+        acceptance_checks: Vec::new(),
+        review_metadata: None,
+        dependencies: Vec::new(),
+        execution_generation: coordination::default_execution_generation(),
+        dependency_generation: None,
+        attempt_count: 0,
+        max_attempts: 1,
+        publish_attempt_count: 0,
+        estimated_minutes: Some(coordination::default_task_estimated_minutes_for_kind(
+            &coordination::CoordinationTaskKind::SurveyWorkspace,
+        )),
+        status: coordination::CoordinationTaskStatus::Completed,
+        claimed_by: None,
+        artifact_summary: None,
+        failure_kind: None,
+        recovery_action: None,
+        created_at: now,
+        updated_at: now,
+    };
+
+    let artifact = coordination::execute_survey_workspace(&task)?;
+    coordination::write_json_atomic(
+        &coordination::artifact_result_path(&council.run_id, SURVEY_ARTIFACT_ID),
+        &artifact,
+    )?;
+    Ok(artifact)
+}
 fn append_ledger_entries(run_id: &str, entries: &[CouncilEntry]) -> Result<()> {
     if entries.is_empty() {
         return Ok(());

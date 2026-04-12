@@ -363,6 +363,31 @@ pub struct TaskArtifact {
     #[serde(default)]
     pub report: TaskExecutionReport,
 }
+#[derive(Clone, Debug)]
+pub struct UpsertRunInput {
+    pub existing_run_id: Option<String>,
+    pub root_chat_id: String,
+    pub workspace_path: String,
+    pub execution_environment: AutonomousExecutionEnvironment,
+    pub runsc_workspace_includes: Vec<String>,
+    pub provider: String,
+    pub goal: String,
+    pub workflow_mode: AutonomousWorkflowMode,
+    pub design_doc_path: String,
+    pub completion_criteria: String,
+    pub max_iterations: u32,
+    pub created_by_instance: Option<u32>,
+    pub max_agents: u32,
+    pub allow_write_tasks: bool,
+    pub require_review_before_apply: bool,
+    pub auto_retry_failed_tasks: bool,
+    pub notes: String,
+    pub review_scope: Option<ReviewScope>,
+    pub review_dimensions: Option<Vec<String>>,
+    pub review_fix_mode: Option<ReviewFixMode>,
+    pub council_turn_policy: Option<TurnPolicy>,
+    pub council_max_turns: Option<u32>,
+}
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaimLifecyclePhase {
@@ -387,4 +412,25 @@ pub const fn default_execution_generation() -> u32 {
 }
 pub const fn default_generated_task_estimated_minutes() -> u32 {
     DEFAULT_GENERATED_TASK_ESTIMATED_MINUTES
+}
+pub const fn default_task_estimated_minutes_for_kind(kind: &CoordinationTaskKind) -> u32 {
+    match kind {
+        CoordinationTaskKind::SurveyWorkspace => 10,
+        CoordinationTaskKind::PlanCodeReview | CoordinationTaskKind::PlanFlatTasks => 10,
+        CoordinationTaskKind::DraftDesignDoc
+        | CoordinationTaskKind::ConvergeDesignDoc
+        | CoordinationTaskKind::MaterializeDesignDoc => 15,
+        CoordinationTaskKind::RalphPlan => 10,
+        CoordinationTaskKind::GeneratedReadTask
+        | CoordinationTaskKind::RalphVerify
+        | CoordinationTaskKind::PerfParse
+        | CoordinationTaskKind::PerfEvaluate => 10,
+        CoordinationTaskKind::GeneratedWriteTask
+        | CoordinationTaskKind::ReviewArtifacts
+        | CoordinationTaskKind::ApplyApprovedEdits
+        | CoordinationTaskKind::RalphExecute => 15,
+        CoordinationTaskKind::PerfBaseline
+        | CoordinationTaskKind::PerfApply
+        | CoordinationTaskKind::PerfBench => 20,
+    }
 }
