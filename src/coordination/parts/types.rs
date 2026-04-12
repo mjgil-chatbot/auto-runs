@@ -292,6 +292,20 @@ pub struct CoordinationTask {
     pub updated_at: DateTime<Utc>,
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CoordinationEvent {
+    pub at: DateTime<Utc>,
+    pub event_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<TaskCategory>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_from: Option<String>,
+    pub message: String,
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TaskArtifact {
     pub run_id: String,
     pub task_id: String,
