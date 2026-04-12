@@ -126,6 +126,63 @@ pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     crate::storage::atomic::atomic_write(path, json.as_bytes())?;
     Ok(())
 }
+pub fn collect_workspace_entries(
+    root: &Path,
+    current: &Path,
+    dirs: &mut Vec<String>,
+    files: &mut Vec<String>,
+    limit: usize,
+) -> Result<()> {
+    if dirs.len() + files.len() >= limit {
+        return Ok(());
+    }
+
+    let entries = match fs::read_dir(current) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()),
+    };
+
+    for entry in entries.flatten() {
+        if dirs.len() + files.len() >= limit {
+            break;
+        }
+        let path = entry.path();
+        let Ok(relative) = path.strip_prefix(root) else {
+            continue;
+        };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            if should_skip_dir(relative) {
+                continue;
+            }
+            dirs.push(relative.to_string_lossy().into_owned());
+            collect_workspace_entries(root, &path, dirs, files, limit)?;
+        } else if file_type.is_file() {
+            files.push(relative.to_string_lossy().into_owned());
+        }
+    }
+
+    Ok(())
+}
+pub fn should_skip_dir(relative: &Path) -> bool {
+    matches!(
+        relative.file_name().and_then(|name| name.to_str()),
+        Some(".git" | "target" | "node_modules" | "dist")
+    )
+}
+pub fn format_lines(lines: &[String]) -> String {
+    if lines.is_empty() {
+        "- <none>".to_string()
+    } else {
+        lines
+            .iter()
+            .map(|line| format!("- {}", line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
 use crate::storage::index::StorageIndex;
 /// Obtain a shared StorageIndex, returning None when the database is
 /// unavailable (e.g. first launch before any directory exists).  Because

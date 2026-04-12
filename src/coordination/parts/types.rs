@@ -37,6 +37,21 @@ use uuid::Uuid;
 /// Default maximum number of attempts before a task is considered permanently failed.
 pub const DEFAULT_TASK_MAX_ATTEMPTS: u32 = 3;
 pub const DEFAULT_GENERATED_TASK_ESTIMATED_MINUTES: u32 = 15;
+pub fn effective_runsc_workspace_includes(
+    run: &CoordinationRun,
+    _task: Option<&CoordinationTask>,
+) -> Vec<String> {
+    let mut includes = Vec::new();
+    let mut seen = BTreeSet::new();
+    for include in &run.runsc_workspace_includes {
+        let trimmed = include.trim();
+        if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
+            continue;
+        }
+        includes.push(trimmed.to_string());
+    }
+    includes
+}
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CoordinationRunStatus {

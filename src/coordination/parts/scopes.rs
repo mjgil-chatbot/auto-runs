@@ -7,6 +7,16 @@ pub fn normalize_scope(scope: &str) -> String {
         trimmed.to_string()
     }
 }
+pub fn raw_scope_is_absolute(scope: &str) -> bool {
+    let trimmed = scope.trim();
+    Path::new(trimmed).is_absolute()
+        || trimmed.starts_with(['\\', '/'])
+        || trimmed
+            .chars()
+            .next()
+            .zip(trimmed.chars().nth(1))
+            .is_some_and(|(first, second)| first.is_ascii_alphabetic() && second == ':')
+}
 pub fn wildcard_prefix(scope: &str) -> Option<String> {
     scope
         .find('*')

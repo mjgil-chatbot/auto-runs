@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::config;
 use crate::data::ChatSession;
+use crate::model::ModelProvider;
 use crate::{
     AutonomousExecutionEnvironment, AutonomousWorkflowMode, ReviewFixMode, ReviewScope, TurnPolicy,
 };
@@ -36,6 +37,15 @@ pub use artifacts_lightweight::*;
 #[path = "parts/artifact_helpers.rs"]
 pub mod artifact_helpers;
 pub use artifact_helpers::*;
+#[path = "parts/workspace_ready.rs"]
+pub mod workspace_ready;
+pub use workspace_ready::*;
+#[path = "parts/lightweight_publish.rs"]
+pub mod lightweight_publish;
+pub use lightweight_publish::*;
+#[path = "parts/builtins.rs"]
+pub mod builtins;
+pub use builtins::*;
 #[path = "parts/seeding.rs"]
 pub mod seeding;
 pub use seeding::*;
@@ -51,6 +61,9 @@ pub use generated_tasks::*;
 #[path = "parts/task_contracts.rs"]
 pub mod task_contracts;
 pub use task_contracts::*;
+#[path = "parts/github_branch_fix.rs"]
+pub mod github_branch_fix;
+pub use github_branch_fix::*;
 #[path = "parts/lightweight_impl.rs"]
 pub mod lightweight_impl;
 pub use lightweight_impl::*;

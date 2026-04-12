@@ -46,3 +46,11 @@ fn extract_balanced_json_from(
 
     None
 }
+pub fn normalize_provider_name(provider: Option<&str>) -> Option<String> {
+    let provider = provider?.trim();
+    match provider.to_ascii_lowercase().as_str() {
+        "glm" => Some("glm".to_string()),
+        "nemotron" | "nvidia" => Some("nemotron".to_string()),
+        _ => ModelProvider::from_arg(provider).map(|provider| provider.as_str().to_string()),
+    }
+}
