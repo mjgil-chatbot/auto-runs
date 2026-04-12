@@ -25,6 +25,14 @@ pub mod council;
 #[path = "parts/types.rs"]
 pub mod types;
 pub use types::*;
+#[path = "parts/claim_diagnostics.rs"]
+pub mod claim_diagnostics;
+#[path = "parts/claim_consistency.rs"]
+pub mod claim_consistency;
+pub use claim_consistency::*;
+#[path = "parts/claims.rs"]
+pub mod claims;
+pub use claims::*;
 #[path = "parts/scopes.rs"]
 pub mod scopes;
 pub use scopes::*;

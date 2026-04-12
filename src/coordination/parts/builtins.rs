@@ -310,3 +310,96 @@ pub fn execute_survey_workspace(task: &CoordinationTask) -> Result<TaskArtifact>
         },
     })
 }
+pub fn execute_plan_code_review(task: &CoordinationTask) -> Result<TaskArtifact> {
+    let run = load_run(&task.run_id)?;
+    let scope = run.review_scope.clone().unwrap_or_default();
+    let automated_checks = load_review_automated_checks(&task.run_id, &task.dependencies);
+    let profile_warnings = code_review::review_profile_warnings(Path::new(&task.cwd), Utc::now());
+    let mut plan = code_review::build_review_plan(
+        Path::new(&task.cwd),
+        &scope,
+        run.review_dimensions.as_deref(),
+        run.review_fix_mode.clone().unwrap_or_default(),
+        automated_checks.clone(),
+        profile_warnings.clone(),
+        Utc::now(),
+    )?;
+    plan.output_path = run.design_doc_path.clone();
+    let body = serde_json::to_string_pretty(&plan)?;
+    Ok(TaskArtifact {
+        run_id: task.run_id.clone(),
+        task_id: task.task_id.clone(),
+        provider: None,
+        task_category: None,
+        fallback_from: None,
+        summary: format!("Planned {} code review chunk(s).", plan.review_tasks.len()),
+        body: body.clone(),
+        completed_at: Utc::now(),
+        report: TaskExecutionReport {
+            outcome: CoordinationTaskOutcome::CompletedNoChange,
+            summary: format!("Planned {} code review chunk(s).", plan.review_tasks.len()),
+            details: body,
+            tests_run: automated_checks
+                .iter()
+                .map(|check| check.command.clone())
+                .collect(),
+            warnings: profile_warnings,
+            design_requirements_satisfied: vec![
+                "Validated review profile freshness at plan time.".to_string(),
+                "Planned read-only review chunks from the requested review scope.".to_string(),
+            ],
+            ..Default::default()
+        },
+    })
+}
+pub fn load_review_automated_checks(
+    run_id: &str,
+    dependencies: &[String],
+) -> Vec<code_review::AutomatedToolCheck> {
+    for dependency in dependencies {
+        let path = artifact_result_path(run_id, dependency);
+        let Ok(raw) = fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(artifact) = serde_json::from_str::<TaskArtifact>(&raw) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&artifact.body) else {
+            continue;
+        };
+        let Some(checks) = value.get("automated_checks") else {
+            continue;
+        };
+        if let Ok(parsed) =
+            serde_json::from_value::<Vec<code_review::AutomatedToolCheck>>(checks.clone())
+        {
+            return parsed;
+        }
+    }
+    Vec::new()
+}
+pub fn load_review_dependency_artifacts(
+    run_id: &str,
+    dependencies: &[String],
+) -> Result<Vec<code_review::ReviewArtifactResponse>> {
+    let mut artifacts = Vec::new();
+    for dependency in dependencies {
+        let path = artifact_result_path(run_id, dependency);
+        if !path.is_file() {
+            continue;
+        }
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let artifact: TaskArtifact = serde_json::from_str(&raw)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        let parsed: code_review::ReviewArtifactResponse = serde_json::from_str(&artifact.body)
+            .with_context(|| {
+                format!(
+                    "failed to parse review artifact body from {}",
+                    path.display()
+                )
+            })?;
+        artifacts.push(parsed);
+    }
+    Ok(artifacts)
+}

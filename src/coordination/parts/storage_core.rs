@@ -8,6 +8,18 @@ pub fn run_dir(run_id: &str) -> PathBuf {
 pub fn run_path(run_id: &str) -> PathBuf {
     run_dir(run_id).join("run.json")
 }
+pub fn tasks_dir(run_id: &str) -> PathBuf {
+    run_dir(run_id).join("tasks")
+}
+pub fn task_path(run_id: &str, task_id: &str) -> PathBuf {
+    tasks_dir(run_id).join(format!("{task_id}.json"))
+}
+pub fn claims_dir(run_id: &str) -> PathBuf {
+    run_dir(run_id).join("claims")
+}
+pub fn claim_path(run_id: &str, task_id: &str) -> PathBuf {
+    claims_dir(run_id).join(format!("{task_id}.json"))
+}
 pub fn events_path(run_id: &str) -> PathBuf {
     run_dir(run_id).join("events.jsonl")
 }
