@@ -12,6 +12,9 @@ use uuid::Uuid;
 use crate::model::ModelProvider;
 use crate::TurnPolicy;
 mod parsing_actions;
+mod runtime_support;
+#[cfg(test)]
+mod tests;
 /// Number of turns without progress before issuing a soft nudge to council members.
 /// After 3 turns, the council may be stuck in circular discussion.
 const SOFT_STALL_TURNS: u32 = 3;

@@ -13,6 +13,7 @@ use chrono::{DateTime, Utc};
 use rust_debug::tracing::{debug, warn};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use crate::config;
 #[path = "../code_review.rs"]
 mod code_review;
 pub mod council;
@@ -22,6 +23,9 @@ pub use types::*;
 #[path = "parts/artifacts.rs"]
 pub mod artifacts;
 pub use artifacts::*;
+#[path = "parts/storage.rs"]
+pub mod storage_parts;
+pub use storage_parts::*;
 #[path = "parts/generated_tasks.rs"]
 pub mod generated_tasks;
 pub use generated_tasks::*;
