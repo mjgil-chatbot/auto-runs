@@ -34,6 +34,8 @@ use std::thread;
 use std::time::Duration;
 #[allow(unused_imports)]
 use uuid::Uuid;
+/// Worker heartbeat interval in seconds.
+pub const TASK_HEARTBEAT_SECS: u64 = 60;
 /// Default maximum number of attempts before a task is considered permanently failed.
 pub const DEFAULT_TASK_MAX_ATTEMPTS: u32 = 3;
 pub const DEFAULT_GENERATED_TASK_ESTIMATED_MINUTES: u32 = 15;

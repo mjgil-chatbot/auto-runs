@@ -36,6 +36,9 @@ pub use claims::*;
 #[path = "parts/scopes.rs"]
 pub mod scopes;
 pub use scopes::*;
+#[path = "parts/claims_launch.rs"]
+pub mod claims_launch;
+pub use claims_launch::*;
 #[path = "parts/artifacts.rs"]
 pub mod artifacts;
 pub use artifacts::*;

@@ -203,6 +203,62 @@ use crate::storage::index::StorageIndex;
 pub fn get_storage_index() -> Option<StorageIndex> {
     StorageIndex::open().ok()
 }
+/// Upsert a coordination task into the SQLite index.
+/// Preserves provider, category, and fallback_from attribution.
+pub fn index_task(task: &CoordinationTask) {
+    let Some(idx) = get_storage_index() else {
+        return;
+    };
+    let conn = idx.connection();
+    let category = task
+        .task_category
+        .as_ref()
+        .and_then(|c| serde_json::to_value(c).ok())
+        .and_then(|v| v.as_str().map(str::to_string));
+    let write_scope_json = serde_json::to_string(&task.write_scope).unwrap_or_default();
+    let claimed_at: Option<String> = task.claimed_by.map(|_| task.updated_at.to_rfc3339());
+    let completed_at: Option<String> = if matches!(
+        task.status,
+        CoordinationTaskStatus::Completed
+            | CoordinationTaskStatus::Failed
+            | CoordinationTaskStatus::Canceled
+    ) {
+        Some(task.updated_at.to_rfc3339())
+    } else {
+        None
+    };
+    if let Err(err) = conn.execute(
+        r#"
+        INSERT INTO tasks (task_id, run_id, title, status, category, provider, fallback_from, write_scope, claimed_by, claimed_at, completed_at, attempt_count)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+        ON CONFLICT(run_id, task_id) DO UPDATE SET
+            status           = excluded.status,
+            category         = excluded.category,
+            provider         = excluded.provider,
+            fallback_from    = excluded.fallback_from,
+            claimed_by       = excluded.claimed_by,
+            claimed_at       = excluded.claimed_at,
+            completed_at     = excluded.completed_at,
+            attempt_count    = excluded.attempt_count
+        "#,
+        rusqlite::params![
+            task.task_id,
+            task.run_id,
+            task.title,
+            format!("{:?}", task.status).to_lowercase(),
+            category,
+            task.assigned_provider,
+            task.provider_hint,
+            write_scope_json,
+            task.claimed_by.map(|pid| pid.to_string()),
+            claimed_at,
+            completed_at,
+            task.attempt_count,
+        ],
+    ) {
+        debug!("index_task failed for {}/{}: {}", task.run_id, task.task_id, err);
+    }
+}
 /// Index a coordination event into SQLite.
 pub fn index_coordination_event(run_id: &str, event: &CoordinationEvent) {
     let Some(idx) = get_storage_index() else {

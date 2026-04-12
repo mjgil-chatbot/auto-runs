@@ -29,7 +29,10 @@ use std::time::Duration;
 use uuid::Uuid;
 #[path = "claims_completion.rs"]
 mod claims_completion;
+#[path = "claims_scan.rs"]
+mod claims_scan;
 use super::*;
+use claims_scan::load_claim_from_entry;
 fn snapshot_lightweight_task_doc_before_write(
     _run_id: &str,
     run: &CoordinationRun,
