@@ -30,6 +30,8 @@ use std::thread;
 use std::time::Duration;
 #[allow(unused_imports)]
 use uuid::Uuid;
+/// Default maximum number of attempts before a task is considered permanently failed.
+pub const DEFAULT_TASK_MAX_ATTEMPTS: u32 = 3;
 pub const DEFAULT_GENERATED_TASK_ESTIMATED_MINUTES: u32 = 15;
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -40,6 +42,19 @@ pub enum CoordinationRunStatus {
     Recovering,
     WaitingForArtifacts,
     WaitingForPolicy,
+    Completed,
+    Failed,
+    Canceled,
+}
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinationTaskStatus {
+    #[default]
+    Queued,
+    Claiming,
+    Running,
+    ArtifactReady,
+    Blocked,
     Completed,
     Failed,
     Canceled,
@@ -102,6 +117,21 @@ pub enum TaskRecoveryAction {
     ReconcileState,
     ManualIntervention,
 }
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskCategory {
+    #[default]
+    Survey,
+    Design,
+    Plan,
+    DeepWrite,
+    QuickWrite,
+    Review,
+    Verify,
+    DocWrite,
+    Research,
+}
+pub use auto_runs_contracts::AgentRole;
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct TaskExecutionReport {
     #[serde(default)]
@@ -150,6 +180,68 @@ pub struct GeneratedTaskSpec {
     pub allowed_tools: Vec<String>,
     #[serde(default)]
     pub acceptance_checks: Vec<String>,
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CoordinationTask {
+    pub task_id: String,
+    pub run_id: String,
+    pub parent_task_id: Option<String>,
+    #[serde(default)]
+    pub kind: CoordinationTaskKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_category: Option<TaskCategory>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_role: Option<AgentRole>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iteration: Option<u32>,
+    pub title: String,
+    pub prompt: String,
+    pub cwd: String,
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    #[serde(default)]
+    pub read_scope: Vec<String>,
+    #[serde(default)]
+    pub write_scope: Vec<String>,
+    #[serde(default)]
+    pub acceptance_checks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_metadata: Option<code_review::ReviewTaskMetadata>,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    #[serde(default = "default_execution_generation")]
+    pub execution_generation: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_generation: Option<u32>,
+    #[serde(default)]
+    pub attempt_count: u32,
+    #[serde(default = "default_task_max_attempts")]
+    pub max_attempts: u32,
+    #[serde(default)]
+    pub publish_attempt_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_minutes: Option<u32>,
+    pub status: CoordinationTaskStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_by: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<TaskFailureKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_action: Option<TaskRecoveryAction>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+pub const fn default_task_max_attempts() -> u32 {
+    DEFAULT_TASK_MAX_ATTEMPTS
+}
+pub const fn default_execution_generation() -> u32 {
+    1
 }
 pub const fn default_generated_task_estimated_minutes() -> u32 {
     DEFAULT_GENERATED_TASK_ESTIMATED_MINUTES

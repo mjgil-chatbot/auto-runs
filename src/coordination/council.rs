@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::model::ModelProvider;
 use crate::TurnPolicy;
+mod parsing;
 mod parsing_actions;
 mod runtime_support;
 #[cfg(test)]

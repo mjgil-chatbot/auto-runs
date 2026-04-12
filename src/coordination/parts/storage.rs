@@ -31,3 +31,4 @@ use std::time::Duration;
 #[allow(unused_imports)]
 use uuid::Uuid;
 include!("storage_core.rs");
+include!("storage_artifacts.rs");

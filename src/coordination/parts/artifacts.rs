@@ -56,3 +56,12 @@ pub fn json_has_required_report_fields(json: &str) -> bool {
         .iter()
         .all(|field| object.contains_key(*field))
 }
+pub fn task_mutates_workspace(task: &CoordinationTask) -> bool {
+    matches!(
+        task.kind,
+        CoordinationTaskKind::MaterializeDesignDoc
+            | CoordinationTaskKind::GeneratedWriteTask
+            | CoordinationTaskKind::ApplyApprovedEdits
+            | CoordinationTaskKind::RalphExecute
+    ) || !task.write_scope.is_empty()
+}
