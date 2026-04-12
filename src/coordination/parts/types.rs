@@ -1,5 +1,9 @@
 use super::*;
 #[allow(unused_imports)]
+use crate::{
+    AutonomousExecutionEnvironment, AutonomousWorkflowMode, ReviewFixMode, ReviewScope, TurnPolicy,
+};
+#[allow(unused_imports)]
 use anyhow::{Context, Result};
 #[allow(unused_imports)]
 use chrono::{DateTime, Utc};
@@ -182,6 +186,56 @@ pub struct GeneratedTaskSpec {
     pub acceptance_checks: Vec<String>,
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ProviderCooldown {
+    pub unavailable_until: DateTime<Utc>,
+    #[serde(default)]
+    pub reason: String,
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CoordinationRun {
+    pub run_id: String,
+    pub root_chat_id: String,
+    pub workspace_path: String,
+    #[serde(default)]
+    pub execution_environment: AutonomousExecutionEnvironment,
+    #[serde(default)]
+    pub runsc_workspace_includes: Vec<String>,
+    pub provider: String,
+    pub goal: String,
+    #[serde(default)]
+    pub workflow_mode: AutonomousWorkflowMode,
+    #[serde(default = "default_design_doc_path")]
+    pub design_doc_path: String,
+    #[serde(default)]
+    pub completion_criteria: String,
+    #[serde(default = "default_max_iterations")]
+    pub max_iterations: u32,
+    pub status: CoordinationRunStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub created_by_instance: Option<u32>,
+    pub max_agents: u32,
+    pub allow_write_tasks: bool,
+    pub require_review_before_apply: bool,
+    pub auto_retry_failed_tasks: bool,
+    pub notes: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_scope: Option<ReviewScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_dimensions: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_fix_mode: Option<ReviewFixMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub council_turn_policy: Option<TurnPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub council_max_turns: Option<u32>,
+    #[serde(default)]
+    pub provider_cooldowns: BTreeMap<String, ProviderCooldown>,
+    pub task_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub processed_mutation_batch_ids: BTreeSet<String>,
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CoordinationTask {
     pub task_id: String,
     pub run_id: String,
@@ -236,6 +290,28 @@ pub struct CoordinationTask {
     pub recovery_action: Option<TaskRecoveryAction>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct TaskArtifact {
+    pub run_id: String,
+    pub task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_category: Option<TaskCategory>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_from: Option<String>,
+    pub summary: String,
+    pub body: String,
+    pub completed_at: DateTime<Utc>,
+    #[serde(default)]
+    pub report: TaskExecutionReport,
+}
+pub fn default_design_doc_path() -> String {
+    crate::default_design_doc_path_for_workflow(&AutonomousWorkflowMode::default())
+}
+pub const fn default_max_iterations() -> u32 {
+    10
 }
 pub const fn default_task_max_attempts() -> u32 {
     DEFAULT_TASK_MAX_ATTEMPTS

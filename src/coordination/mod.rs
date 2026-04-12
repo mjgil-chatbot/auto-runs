@@ -15,6 +15,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::config;
 use crate::data::ChatSession;
+use crate::{
+    AutonomousExecutionEnvironment, AutonomousWorkflowMode, ReviewFixMode, ReviewScope, TurnPolicy,
+};
 #[path = "../code_review.rs"]
 mod code_review;
 pub mod council;
@@ -27,9 +30,15 @@ pub use scopes::*;
 #[path = "parts/artifacts.rs"]
 pub mod artifacts;
 pub use artifacts::*;
+#[path = "parts/artifacts_lightweight.rs"]
+pub mod artifacts_lightweight;
+pub use artifacts_lightweight::*;
 #[path = "parts/artifact_helpers.rs"]
 pub mod artifact_helpers;
 pub use artifact_helpers::*;
+#[path = "parts/seeding.rs"]
+pub mod seeding;
+pub use seeding::*;
 #[path = "parts/storage.rs"]
 pub mod storage_parts;
 pub use storage_parts::*;
@@ -42,3 +51,6 @@ pub use generated_tasks::*;
 #[path = "parts/task_contracts.rs"]
 pub mod task_contracts;
 pub use task_contracts::*;
+#[path = "parts/lightweight_impl.rs"]
+pub mod lightweight_impl;
+pub use lightweight_impl::*;
