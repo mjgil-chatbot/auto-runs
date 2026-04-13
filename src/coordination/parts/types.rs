@@ -308,6 +308,44 @@ pub struct CoordinationTask {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+impl Default for CoordinationTask {
+    fn default() -> Self {
+        let now = Utc::now();
+        Self {
+            task_id: String::new(),
+            run_id: String::new(),
+            parent_task_id: None,
+            kind: CoordinationTaskKind::default(),
+            assigned_provider: None,
+            task_category: None,
+            provider_hint: None,
+            required_role: None,
+            iteration: None,
+            title: String::new(),
+            prompt: String::new(),
+            cwd: String::new(),
+            allowed_tools: Vec::new(),
+            read_scope: Vec::new(),
+            write_scope: Vec::new(),
+            acceptance_checks: Vec::new(),
+            review_metadata: None,
+            dependencies: Vec::new(),
+            execution_generation: default_execution_generation(),
+            dependency_generation: None,
+            attempt_count: 0,
+            max_attempts: default_task_max_attempts(),
+            publish_attempt_count: 0,
+            estimated_minutes: None,
+            status: CoordinationTaskStatus::Queued,
+            claimed_by: None,
+            artifact_summary: None,
+            failure_kind: None,
+            recovery_action: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TaskClaim {
     pub run_id: String,
