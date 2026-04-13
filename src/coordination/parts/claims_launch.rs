@@ -4,6 +4,10 @@ use crate::config;
 #[allow(unused_imports)]
 use crate::model::ModelProvider;
 #[allow(unused_imports)]
+use crate::AutonomousExecutionEnvironment;
+#[allow(unused_imports)]
+use crate::AutonomousWorkflowMode;
+#[allow(unused_imports)]
 use anyhow::{Context, Result};
 #[allow(unused_imports)]
 use chrono::{DateTime, Utc};

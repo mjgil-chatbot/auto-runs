@@ -84,6 +84,8 @@ pub use interrupts::*;
 #[path = "parts/expansion_support.rs"]
 pub mod expansion_support;
 pub use expansion_support::*;
+#[path = "parts/perf_failure_recovery.rs"]
+pub mod perf_failure_recovery;
 #[path = "parts/perf_worktree.rs"]
 pub mod perf_worktree;
 pub use perf_worktree::*;
