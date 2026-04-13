@@ -30,6 +30,9 @@ pub mod claim_diagnostics;
 #[path = "parts/claim_consistency.rs"]
 pub mod claim_consistency;
 pub use claim_consistency::*;
+#[path = "parts/run_lifecycle.rs"]
+pub mod run_lifecycle;
+pub use run_lifecycle::*;
 #[path = "parts/claims.rs"]
 pub mod claims;
 pub use claims::*;
@@ -54,6 +57,9 @@ pub use workspace_ready::*;
 #[path = "parts/lightweight_publish.rs"]
 pub mod lightweight_publish;
 pub use lightweight_publish::*;
+#[path = "parts/stub_markers.rs"]
+pub mod stub_markers;
+pub use stub_markers::*;
 #[path = "parts/builtins.rs"]
 pub mod builtins;
 pub use builtins::*;

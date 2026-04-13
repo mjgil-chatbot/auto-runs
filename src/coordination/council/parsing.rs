@@ -1,6 +1,142 @@
 use super::parsing_actions::*;
 use super::*;
 use crate::coordination;
+pub(super) fn validate_claim_request(
+    council: &CouncilRun,
+    scope: &str,
+    requester: CouncilSpeaker,
+) -> Result<()> {
+    if !requester.is_model() {
+        bail!("only model speakers can claim write scopes");
+    }
+    if !council.allow_write_tasks {
+        bail!("write tasks are disabled for this council run");
+    }
+    if scope.trim().is_empty() {
+        bail!("claim scope cannot be empty");
+    }
+    for revoked in &council.revoked_claims {
+        if revoked.claimed_by == requester
+            && revoked.reason == ClaimRevocationReason::StaleTimeout
+            && coordination::scope_conflicts(&revoked.scope, scope)
+        {
+            bail!(
+                "scope '{}' was revoked as stale earlier in this run and cannot be reclaimed by {}",
+                revoked.scope,
+                requester.label()
+            );
+        }
+    }
+
+    for active in &council.active_claims {
+        if active.claimed_by == requester {
+            continue;
+        }
+        if coordination::scope_conflicts(&active.scope, scope) {
+            bail!(
+                "scope '{}' conflicts with '{}' held by {}",
+                scope,
+                active.scope,
+                active.claimed_by.label()
+            );
+        }
+    }
+
+    Ok(())
+}
+pub(super) fn release_claim(
+    council: &mut CouncilRun,
+    speaker: CouncilSpeaker,
+    scope: &str,
+) -> bool {
+    let before = council.active_claims.len();
+    council
+        .active_claims
+        .retain(|claim| !(claim.claimed_by == speaker && claim.scope == scope));
+    before != council.active_claims.len()
+}
+fn validate_work_report(
+    council: &CouncilRun,
+    speaker: CouncilSpeaker,
+    changed_files: &[String],
+) -> Result<Vec<String>> {
+    let mut errors = Vec::new();
+    let root = Path::new(&council.workspace_path);
+    let speaker_claims: Vec<&str> = council
+        .active_claims
+        .iter()
+        .filter(|claim| claim.claimed_by == speaker)
+        .map(|claim| claim.scope.as_str())
+        .collect();
+
+    if changed_files.is_empty() {
+        errors.push("no changed files were listed in the work report".to_string());
+        return Ok(errors);
+    }
+
+    for file in changed_files {
+        // Reject parent-directory traversal before any scope or disk checks (finding 7).
+        if file.contains("..") {
+            errors.push(format!(
+                "'{}' contains parent-directory traversal and is rejected",
+                file
+            ));
+            continue;
+        }
+
+        let Some(relative): Option<String> = coordination::workspace_relative_path(root, file)
+        else {
+            errors.push(format!("'{}' is not inside the workspace root", file));
+            continue;
+        };
+
+        // After relativization, verify the resolved path stays under the workspace root.
+        {
+            let resolved = root.join(&relative);
+            if let (Ok(canon_root), Ok(canon_resolved)) =
+                (root.canonicalize(), resolved.canonicalize())
+            {
+                if !canon_resolved.starts_with(&canon_root) {
+                    errors.push(format!(
+                        "'{}' resolves outside the workspace root",
+                        relative
+                    ));
+                    continue;
+                }
+            }
+            // For files that don't exist yet, fall through to the existing existence check below.
+        }
+
+        if !speaker_claims
+            .iter()
+            .any(|scope| coordination::scope_allows_relative_path(scope, &relative))
+        {
+            errors.push(format!(
+                "'{}' is outside {}'s claimed scopes",
+                relative,
+                speaker.label()
+            ));
+        }
+
+        let candidate = root.join(&relative);
+        if !candidate.exists() {
+            errors.push(format!("'{}' does not exist on disk", relative));
+            continue;
+        }
+
+        if contains_stub_markers(root, &relative)? {
+            errors.push(format!(
+                "'{}' still contains blocked stub markers",
+                relative
+            ));
+        }
+    }
+
+    Ok(errors)
+}
+pub(super) fn contains_stub_markers(root: &Path, changed_file: &str) -> Result<bool> {
+    crate::coordination::file_contains_stub_markers(root, changed_file)
+}
 fn store_work_artifact(
     run_id: &str,
     council: &CouncilRun,
