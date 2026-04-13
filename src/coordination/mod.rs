@@ -84,6 +84,15 @@ pub use interrupts::*;
 #[path = "parts/expansion_support.rs"]
 pub mod expansion_support;
 pub use expansion_support::*;
+#[path = "parts/perf_hill_climber.rs"]
+pub mod perf_hill_climber;
+pub use perf_hill_climber::*;
+#[path = "parts/perf_prompts.rs"]
+pub mod perf_prompts;
+pub use perf_prompts::*;
+#[path = "parts/perf_benchmark.rs"]
+pub mod perf_benchmark;
+pub use perf_benchmark::*;
 #[path = "parts/perf_failure_recovery.rs"]
 pub mod perf_failure_recovery;
 #[path = "parts/perf_worktree.rs"]

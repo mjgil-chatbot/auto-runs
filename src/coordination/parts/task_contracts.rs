@@ -100,6 +100,11 @@ pub struct ReviewFindingsPayload {
     #[serde(default)]
     pub fix_tasks: Vec<GeneratedTaskSpec>,
 }
+#[derive(Clone, Debug, Serialize, Deserialize, Default, JsonSchema)]
+pub struct PerfIdeasPayload {
+    #[serde(default)]
+    pub ideas: Vec<PerfIdea>,
+}
 static CONTRACT_REGISTRY: std::sync::LazyLock<Vec<TaskContract>> =
     std::sync::LazyLock::new(build_contract_registry);
 fn build_contract_registry() -> Vec<TaskContract> {
@@ -257,4 +262,9 @@ pub fn review_findings_payload_from_envelope(
     envelope: &TaskArtifactEnvelope,
 ) -> Result<ReviewFindingsPayload> {
     serde_json::from_value(envelope.payload.clone()).context("invalid ReviewFindings payload")
+}
+pub fn perf_ideas_payload_from_envelope(
+    envelope: &TaskArtifactEnvelope,
+) -> Result<PerfIdeasPayload> {
+    serde_json::from_value(envelope.payload.clone()).context("invalid PerfIdeas payload")
 }
