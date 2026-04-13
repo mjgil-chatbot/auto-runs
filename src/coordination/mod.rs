@@ -72,6 +72,9 @@ pub use generated_tasks::*;
 #[path = "parts/task_contracts.rs"]
 pub mod task_contracts;
 pub use task_contracts::*;
+#[path = "parts/interrupts.rs"]
+pub mod interrupts;
+pub use interrupts::*;
 #[path = "parts/expansion_support.rs"]
 pub mod expansion_support;
 pub use expansion_support::*;
@@ -86,4 +89,7 @@ pub mod github_branch_fix_wait;
 pub use github_branch_fix_wait::*;
 #[path = "parts/lightweight_impl.rs"]
 pub mod lightweight_impl;
+#[path = "parts/ipc.rs"]
+pub mod ipc;
+pub use ipc::*;
 pub use lightweight_impl::*;
