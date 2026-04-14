@@ -10,4 +10,5 @@ pub use chatbot_lib::config;
 pub use chatbot_lib::data;
 pub use chatbot_lib::model;
 pub use chatbot_lib::storage;
+pub use chatbot_lib::stream;
 pub mod coordination;

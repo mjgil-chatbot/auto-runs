@@ -42,6 +42,12 @@ pub use scopes::*;
 #[path = "parts/claims_launch.rs"]
 pub mod claims_launch;
 pub use claims_launch::*;
+#[path = "parts/provider_execution.rs"]
+pub mod provider_execution;
+pub use provider_execution::*;
+#[path = "parts/provider_execution_helpers.rs"]
+pub mod provider_execution_helpers;
+pub use provider_execution_helpers::*;
 #[path = "parts/artifacts.rs"]
 pub mod artifacts;
 pub use artifacts::*;
@@ -57,6 +63,9 @@ pub use workspace_ready::*;
 #[path = "parts/lightweight_publish.rs"]
 pub mod lightweight_publish;
 pub use lightweight_publish::*;
+#[path = "parts/plan_dependencies.rs"]
+pub mod plan_dependencies;
+pub use plan_dependencies::*;
 #[path = "parts/stub_markers.rs"]
 pub mod stub_markers;
 pub use stub_markers::*;

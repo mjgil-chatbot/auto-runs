@@ -39,6 +39,8 @@ pub const TASK_HEARTBEAT_SECS: u64 = 60;
 /// Default maximum number of attempts before a task is considered permanently failed.
 pub const DEFAULT_TASK_MAX_ATTEMPTS: u32 = 3;
 pub const DEFAULT_GENERATED_TASK_ESTIMATED_MINUTES: u32 = 15;
+pub const MIN_TASK_ESTIMATED_MINUTES: u32 = 1;
+pub const MAX_TASK_ESTIMATED_MINUTES: u32 = 180;
 pub fn effective_runsc_workspace_includes(
     run: &CoordinationRun,
     _task: Option<&CoordinationTask>,
@@ -471,4 +473,12 @@ pub const fn default_task_estimated_minutes_for_kind(kind: &CoordinationTaskKind
         | CoordinationTaskKind::PerfApply
         | CoordinationTaskKind::PerfBench => 20,
     }
+}
+pub fn normalize_task_estimated_minutes(
+    estimated_minutes: Option<u32>,
+    kind: &CoordinationTaskKind,
+) -> u32 {
+    estimated_minutes
+        .unwrap_or_else(|| default_task_estimated_minutes_for_kind(kind))
+        .clamp(MIN_TASK_ESTIMATED_MINUTES, MAX_TASK_ESTIMATED_MINUTES)
 }
