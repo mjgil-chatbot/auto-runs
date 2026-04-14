@@ -90,6 +90,9 @@ pub use task_contracts::*;
 #[path = "parts/interrupts.rs"]
 pub mod interrupts;
 pub use interrupts::*;
+#[path = "parts/rails.rs"]
+pub mod rails;
+pub use rails::*;
 #[path = "parts/expansion_support.rs"]
 pub mod expansion_support;
 pub use expansion_support::*;
