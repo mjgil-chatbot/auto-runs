@@ -30,6 +30,8 @@ pub mod claim_diagnostics;
 #[path = "parts/claim_consistency.rs"]
 pub mod claim_consistency;
 pub use claim_consistency::*;
+#[path = "parts/reconciler.rs"]
+pub mod reconciler;
 #[path = "parts/run_lifecycle.rs"]
 pub mod run_lifecycle;
 pub use run_lifecycle::*;
@@ -75,6 +77,9 @@ pub use builtins::*;
 #[path = "parts/seeding.rs"]
 pub mod seeding;
 pub use seeding::*;
+#[path = "parts/ralph.rs"]
+pub mod ralph;
+pub use ralph::*;
 #[path = "parts/storage.rs"]
 pub mod storage_parts;
 pub use storage_parts::*;

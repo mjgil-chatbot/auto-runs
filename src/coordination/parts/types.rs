@@ -204,6 +204,23 @@ pub struct GeneratedTaskSpec {
     #[serde(default)]
     pub acceptance_checks: Vec<String>,
 }
+#[derive(Deserialize)]
+pub struct RalphVerificationResult {
+    pub complete: bool,
+    #[serde(default)]
+    pub reason: String,
+}
+#[derive(Deserialize)]
+pub struct RalphExecutionResult {
+    pub outcome: CoordinationTaskOutcome,
+    pub summary: String,
+    #[serde(default)]
+    pub changed_files: Vec<String>,
+    #[serde(default)]
+    pub blockers: Vec<String>,
+    #[serde(default)]
+    pub reason: String,
+}
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ProviderCooldown {
     pub unavailable_until: DateTime<Utc>,
@@ -473,6 +490,10 @@ pub const fn default_task_estimated_minutes_for_kind(kind: &CoordinationTaskKind
         | CoordinationTaskKind::PerfApply
         | CoordinationTaskKind::PerfBench => 20,
     }
+}
+pub fn effective_dependency_generation(task: &CoordinationTask) -> u32 {
+    task.dependency_generation
+        .unwrap_or(task.execution_generation)
 }
 pub fn normalize_task_estimated_minutes(
     estimated_minutes: Option<u32>,
