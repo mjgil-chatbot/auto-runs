@@ -1,4 +1,5 @@
 use super::*;
+
 include!("tests/harness.rs");
 include!("tests/execution_reports_and_restarts.rs");
 include!("tests/generated_task_spec_validation.rs");
@@ -17,3 +18,13 @@ include!("tests/launch_failures_and_task_categories.rs");
 include!("tests/driver_consistency_and_claim_recovery.rs");
 include!("tests/code_review_document_validation.rs");
 include!("tests/stub_marker_validation.rs");
+include!("tests/perf_hill_climber_recovery.rs");
+include!("tests/provider_execution_dispatch.rs");
+include!("tests/lightweight_repo_configuration.rs");
+include!("tests/rails_and_guardrails.rs");
+include!("tests/lightweight_completion_gate.rs");
+include!("tests/lightweight_git_workflow.rs");
+include!("tests/github_branch_fix.rs");
+include!("tests/github_branch_fix_wait.rs");
+include!("tests/lightweight_implementation.rs");
+include!("tests/stop_run_worker_shutdown.rs");
