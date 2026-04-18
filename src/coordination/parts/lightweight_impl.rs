@@ -81,6 +81,24 @@ impl<'a> LightweightWorkflowBehavior<'a> {
     pub fn persists_materialized_files(&self) -> bool {
         false
     }}
+impl<'a> LightweightWorkflowBehavior<'a> {
+    pub fn next_task_doc_after_review(
+        &self,
+        task: &CoordinationTask,
+        artifact: &TaskArtifact,
+    ) -> Option<String> {
+        if task.kind != CoordinationTaskKind::ReviewArtifacts
+            || artifact.report.fix_tasks.is_empty()
+        {
+            return None;
+        }
+        if self.run.workflow_mode == AutonomousWorkflowMode::LightweightImplementation
+            && !lightweight_review_should_recurse(self.run, task, artifact)
+        {
+            return None;
+        }
+        Some(lightweight_next_task_doc_path_for_run(self.run))
+    }}
 pub fn lightweight_config_from_run(run: &CoordinationRun) -> LightweightImplementationConfig {
     if run.workflow_mode == AutonomousWorkflowMode::GithubBranchFix {
         return LightweightImplementationConfig {
@@ -274,6 +292,231 @@ fn lightweight_status_doc_path(task_doc_path: &str) -> String {
         _ => file_name,
     }
 }
+pub fn refresh_lightweight_status_projection(run_id: &str) -> Result<()> {
+    let run = load_run(run_id)?;
+    if run.workflow_mode != AutonomousWorkflowMode::LightweightImplementation {
+        return Ok(());
+    }
+    let snapshot = refresh_lightweight_broker_snapshot(run_id)?;
+    let execution_tasks = load_lightweight_execution_tasks(run_id)?;
+    let status_doc_path = workspace_path_for_run(&run, &snapshot.task_document.status_path);
+    if let Some(parent) = status_doc_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(
+        &status_doc_path,
+        render_lightweight_status_projection(&snapshot, &execution_tasks),
+    )
+    .with_context(|| format!("failed to write {}", status_doc_path.display()))?;
+    Ok(())
+}
+pub fn refresh_lightweight_broker_snapshot(run_id: &str) -> Result<LightweightBrokerSnapshot> {
+    let run = load_run(run_id)?;
+    if run.workflow_mode != AutonomousWorkflowMode::LightweightImplementation {
+        anyhow::bail!("lightweight broker snapshot is only available for lightweight runs");
+    }
+
+    let tasks = load_tasks(run_id)?;
+    let source_tasks =
+        parse_lightweight_source_tasks(&run, &lightweight_current_task_doc_path(&run));
+    let execution_tasks = build_lightweight_execution_task_records(&tasks);
+    let pass_records = build_lightweight_pass_records(&run, &source_tasks, &execution_tasks);
+    write_json_atomic(&lightweight_source_tasks_path(run_id), &source_tasks)?;
+    write_json_atomic(&lightweight_execution_tasks_path(run_id), &execution_tasks)?;
+    write_json_atomic(&lightweight_passes_path(run_id), &pass_records)?;
+    let snapshot = build_lightweight_broker_snapshot(
+        run_id,
+        &run,
+        &source_tasks,
+        &execution_tasks,
+        &pass_records,
+    );
+    write_json_atomic(&lightweight_broker_snapshot_path(run_id), &snapshot)?;
+    Ok(snapshot)
+}
+pub fn load_lightweight_broker_snapshot(run_id: &str) -> Result<LightweightBrokerSnapshot> {
+    let raw = fs::read_to_string(lightweight_broker_snapshot_path(run_id)).with_context(|| {
+        format!(
+            "failed to read lightweight broker snapshot for run {}",
+            run_id
+        )
+    })?;
+    Ok(serde_json::from_str(&raw)?)
+}
+pub fn load_lightweight_source_tasks(run_id: &str) -> Result<Vec<LightweightSourceTaskRecord>> {
+    let raw = fs::read_to_string(lightweight_source_tasks_path(run_id))
+        .with_context(|| format!("failed to read lightweight source tasks for run {}", run_id))?;
+    Ok(serde_json::from_str(&raw)?)
+}
+pub fn load_lightweight_execution_tasks(
+    run_id: &str,
+) -> Result<Vec<LightweightExecutionTaskRecord>> {
+    let raw = fs::read_to_string(lightweight_execution_tasks_path(run_id)).with_context(|| {
+        format!(
+            "failed to read lightweight execution tasks for run {}",
+            run_id
+        )
+    })?;
+    Ok(serde_json::from_str(&raw)?)
+}
+pub fn load_lightweight_pass_records(run_id: &str) -> Result<Vec<LightweightPassRecord>> {
+    let raw = fs::read_to_string(lightweight_passes_path(run_id))
+        .with_context(|| format!("failed to read lightweight pass records for run {}", run_id))?;
+    Ok(serde_json::from_str(&raw)?)
+}
+fn build_lightweight_broker_snapshot(
+    run_id: &str,
+    run: &CoordinationRun,
+    source_tasks: &[LightweightSourceTaskRecord],
+    execution_tasks: &[LightweightExecutionTaskRecord],
+    pass_records: &[LightweightPassRecord],
+) -> LightweightBrokerSnapshot {
+    let config = lightweight_config_from_run(run);
+    let current_cycle =
+        lightweight_task_doc_cycle_for_path(&config.task_doc_path).unwrap_or(config.task_doc_cycle);
+    let task_document = LightweightTaskDocumentRecord {
+        active_path: config.task_doc_path.clone(),
+        next_path: lightweight_next_task_doc_path_for_run(run),
+        status_path: lightweight_status_doc_path_for_run(run),
+        cycle: current_cycle,
+        updated_at: run.updated_at,
+    };
+    LightweightBrokerSnapshot {
+        run_id: run.run_id.clone(),
+        run_status: run.status,
+        design_doc_path: run.design_doc_path.clone(),
+        task_document,
+        source_tasks_path: lightweight_source_tasks_path(run_id)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("lightweight_source_tasks.json")
+            .to_string(),
+        source_task_count: source_tasks.len(),
+        execution_tasks_path: lightweight_execution_tasks_path(run_id)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("lightweight_execution_tasks.json")
+            .to_string(),
+        execution_task_count: execution_tasks.len(),
+        passes_path: lightweight_passes_path(run_id)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("lightweight_passes.json")
+            .to_string(),
+        pass_count: pass_records.len(),
+        refreshed_at: run.updated_at,
+    }
+}
+fn build_lightweight_execution_task_records(
+    tasks: &[CoordinationTask],
+) -> Vec<LightweightExecutionTaskRecord> {
+    tasks
+        .iter()
+        .cloned()
+        .map(|task| LightweightExecutionTaskRecord {
+            execution_task_id: task.task_id,
+            parent_task_id: task.parent_task_id,
+            title: task.title,
+            kind: task.kind,
+            status: task.status,
+            assigned_provider: task.assigned_provider,
+            task_category: task.task_category,
+            dependencies: task.dependencies,
+            read_scope: task.read_scope,
+            write_scope: task.write_scope,
+            artifact_summary: task.artifact_summary,
+            failure_kind: task.failure_kind,
+            recovery_action: task.recovery_action,
+            attempt_count: task.attempt_count,
+            max_attempts: task.max_attempts,
+            publish_attempt_count: task.publish_attempt_count,
+            created_at: task.created_at,
+            updated_at: task.updated_at,
+        })
+        .collect()
+}
+fn build_lightweight_pass_records(
+    run: &CoordinationRun,
+    source_tasks: &[LightweightSourceTaskRecord],
+    execution_tasks: &[LightweightExecutionTaskRecord],
+) -> Vec<LightweightPassRecord> {
+    let config = lightweight_config_from_run(run);
+    let cycle =
+        lightweight_task_doc_cycle_for_path(&config.task_doc_path).unwrap_or(config.task_doc_cycle);
+    let status = if run.status == CoordinationRunStatus::Completed {
+        LightweightPassStatus::Completed
+    } else {
+        LightweightPassStatus::Active
+    };
+    vec![LightweightPassRecord {
+        pass_id: format!("pass-{cycle}"),
+        cycle,
+        task_doc_path: config.task_doc_path,
+        status,
+        source_task_ids: source_tasks
+            .iter()
+            .map(|task| task.source_task_id.clone())
+            .collect(),
+        execution_task_ids: execution_tasks
+            .iter()
+            .map(|task| task.execution_task_id.clone())
+            .collect(),
+        created_at: run.created_at,
+        updated_at: run.updated_at,
+    }]
+}
+fn parse_lightweight_source_tasks(
+    run: &CoordinationRun,
+    task_doc_path: &str,
+) -> Vec<LightweightSourceTaskRecord> {
+    let path = workspace_path_for_run(run, task_doc_path);
+    let Ok(contents) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+
+    let mut section_stack: Vec<String> = Vec::new();
+    let mut duplicate_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut source_tasks = Vec::new();
+
+    for line in contents.lines() {
+        if let Some((level, title)) = parse_markdown_heading(line) {
+            let normalized_title = title.trim();
+            if normalized_title.is_empty() {
+                continue;
+            }
+            while section_stack.len() >= level {
+                section_stack.pop();
+            }
+            section_stack.push(normalized_title.to_string());
+            continue;
+        }
+
+        let Some((completed, title)) = parse_markdown_task_item(line) else {
+            continue;
+        };
+        let title = title.trim();
+        if title.is_empty() {
+            continue;
+        }
+        let base_id = lightweight_source_task_base_id(&section_stack, title);
+        let duplicate_index = duplicate_counts.entry(base_id.clone()).or_insert(0);
+        *duplicate_index += 1;
+        let source_task_id = if *duplicate_index == 1 {
+            base_id
+        } else {
+            format!("{base_id}-{}", *duplicate_index)
+        };
+        source_tasks.push(LightweightSourceTaskRecord {
+            source_task_id,
+            source_path: task_doc_path.to_string(),
+            section_path: section_stack.clone(),
+            title: title.to_string(),
+            completed,
+        });
+    }
+
+    source_tasks
+}
 fn parse_markdown_heading(line: &str) -> Option<(usize, &str)> {
     let trimmed = line.trim();
     let level = trimmed.chars().take_while(|ch| *ch == '#').count();
@@ -337,6 +580,82 @@ fn lightweight_source_task_slug(value: &str) -> String {
         slug
     }
 }
+fn render_lightweight_status_projection(
+    snapshot: &LightweightBrokerSnapshot,
+    execution_tasks: &[LightweightExecutionTaskRecord],
+) -> String {
+    let summary_statuses = [
+        CoordinationTaskStatus::Queued,
+        CoordinationTaskStatus::Claiming,
+        CoordinationTaskStatus::Running,
+        CoordinationTaskStatus::ArtifactReady,
+        CoordinationTaskStatus::Completed,
+        CoordinationTaskStatus::Failed,
+        CoordinationTaskStatus::Blocked,
+        CoordinationTaskStatus::Canceled,
+    ];
+
+    let mut rendered = Vec::new();
+    rendered.push("# Lightweight Status".to_string());
+    rendered.push(String::new());
+    rendered.push("Generated by auto-runs. Do not edit manually.".to_string());
+    rendered.push(String::new());
+    rendered.push(format!("- Run ID: `{}`", snapshot.run_id));
+    rendered.push(format!("- Run Status: `{}`", snapshot.run_status.as_str()));
+    rendered.push(format!("- Design Doc: `{}`", snapshot.design_doc_path));
+    rendered.push(format!(
+        "- Active Task List: `{}`",
+        snapshot.task_document.active_path
+    ));
+    rendered.push(format!(
+        "- Next Task List: `{}`",
+        snapshot.task_document.next_path
+    ));
+    rendered.push(String::new());
+    rendered.push("## Task Summary".to_string());
+    rendered.push(String::new());
+    for status in summary_statuses {
+        rendered.push(format!(
+            "- {}: {}",
+            lightweight_task_status_label(status),
+            execution_tasks
+                .iter()
+                .filter(|task| task.status == status)
+                .count()
+        ));
+    }
+    rendered.push(String::new());
+    rendered.push("## Tasks".to_string());
+    rendered.push(String::new());
+    let mut ordered_tasks = execution_tasks.to_vec();
+    ordered_tasks.sort_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.title.cmp(&right.title))
+    });
+    for task in ordered_tasks {
+        rendered.push(format!(
+            "- [{}] {} (`{}`)",
+            lightweight_task_status_label(task.status),
+            task.title,
+            lightweight_task_kind_label(task.kind)
+        ));
+        if let Some(provider) = task.assigned_provider.as_deref() {
+            rendered.push(format!("  provider: `{provider}`"));
+        }
+        if let Some(summary) = task.artifact_summary.as_deref() {
+            rendered.push(format!("  summary: {}", summary.trim()));
+        }
+        if let Some(action) = task.recovery_action {
+            rendered.push(format!(
+                "  recovery: `{}`",
+                lightweight_recovery_action_label(action)
+            ));
+        }
+    }
+    rendered.push(String::new());
+    rendered.join("\n")
+}
 fn lightweight_task_status_label(status: CoordinationTaskStatus) -> &'static str {
     match status {
         CoordinationTaskStatus::Queued => "queued",
@@ -389,6 +708,22 @@ pub fn lightweight_review_task_is_superseded(
                 && candidate.parent_task_id.as_deref() == Some(task.task_id.as_str())
         })
 }
+pub fn lightweight_review_should_recurse(
+    run: &CoordinationRun,
+    review_task: &CoordinationTask,
+    artifact: &TaskArtifact,
+) -> bool {
+    if run.workflow_mode != AutonomousWorkflowMode::LightweightImplementation
+        || review_task.kind != CoordinationTaskKind::ReviewArtifacts
+        || artifact.report.fix_tasks.is_empty()
+    {
+        return true;
+    }
+    if !lightweight_review_has_actionable_repo_local_work(artifact) {
+        return false;
+    }
+    !lightweight_review_has_duplicate_blocker_signature(&run.run_id, review_task, artifact)
+}
 pub fn lightweight_review_has_actionable_repo_local_work(artifact: &TaskArtifact) -> bool {
     artifact
         .report
@@ -399,6 +734,84 @@ pub fn lightweight_review_has_actionable_repo_local_work(artifact: &TaskArtifact
             Ok(_) => false,
             Err(_) => true,
         })
+}
+pub fn lightweight_review_has_duplicate_blocker_signature(
+    run_id: &str,
+    review_task: &CoordinationTask,
+    artifact: &TaskArtifact,
+) -> bool {
+    let current_signature = lightweight_review_blocker_signature(artifact);
+    let parent_review_id = review_task.parent_task_id.as_deref().and_then(|task_id| {
+        load_task(run_id, task_id)
+            .ok()
+            .filter(|task| task.kind == CoordinationTaskKind::ReviewArtifacts)
+            .map(|task| task.task_id)
+    });
+    let Some(parent_review_id) = parent_review_id else {
+        return false;
+    };
+    let parent_artifact_path = artifact_result_path(run_id, &parent_review_id);
+    let Ok(raw) = fs::read_to_string(&parent_artifact_path) else {
+        return false;
+    };
+    let Ok(parent_artifact) = serde_json::from_str::<TaskArtifact>(&raw) else {
+        return false;
+    };
+    let parent_signature = lightweight_review_blocker_signature(&parent_artifact);
+    current_signature.is_some() && current_signature == parent_signature
+}
+fn lightweight_review_blocker_signature(artifact: &TaskArtifact) -> Option<String> {
+    if !matches!(
+        artifact.report.outcome,
+        CoordinationTaskOutcome::Blocked
+            | CoordinationTaskOutcome::Partial
+            | CoordinationTaskOutcome::Failed
+    ) {
+        return None;
+    }
+    let mut parts = Vec::new();
+    let mut blockers = artifact
+        .report
+        .blockers
+        .iter()
+        .map(|value| lightweight_blocker_text_signature(value))
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    blockers.sort();
+    blockers.dedup();
+    if !blockers.is_empty() {
+        parts.push(format!("blockers:{}", blockers.join("|")));
+    }
+
+    let mut gaps = artifact
+        .report
+        .remaining_gaps
+        .iter()
+        .map(|value| lightweight_blocker_text_signature(value))
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    gaps.sort();
+    gaps.dedup();
+    if !gaps.is_empty() {
+        parts.push(format!("remaining_gaps:{}", gaps.join("|")));
+    }
+
+    if parts.is_empty() {
+        let summary = lightweight_blocker_text_signature(&artifact.report.summary);
+        if !summary.is_empty() {
+            parts.push(format!("summary:{summary}"));
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "{}::{}",
+            artifact.report.outcome.as_str(),
+            parts.join("::")
+        ))
+    }
 }
 fn lightweight_blocker_text_signature(value: &str) -> String {
     value
@@ -462,6 +875,31 @@ pub fn lightweight_write_scope_conflict_is_coordination_only(
         .cloned()
         .collect::<Vec<_>>();
     !scopes_conflict(&filtered_candidate, &filtered_other)
+}
+pub fn update_lightweight_task_doc_after_review(
+    run: &mut CoordinationRun,
+    task: &CoordinationTask,
+    artifact: &TaskArtifact,
+    _materialized_files: &[MaterializedArtifactFile],
+) -> Option<String> {
+    if run.workflow_mode == AutonomousWorkflowMode::GithubBranchFix {
+        return None;
+    }
+    let Some(behavior) = LightweightWorkflowBehavior::for_run(run) else {
+        return None;
+    };
+    let next_path = behavior.next_task_doc_after_review(task, artifact)?;
+    let config = lightweight_config_from_run(run);
+    let current_cycle =
+        lightweight_task_doc_cycle_for_path(&config.task_doc_path).unwrap_or(config.task_doc_cycle);
+    let next_cycle = current_cycle + 1;
+    run.notes = notes_with_setting(&run.notes, LIGHTWEIGHT_TASK_DOC_NOTE_KEY, &next_path);
+    run.notes = notes_with_setting(
+        &run.notes,
+        LIGHTWEIGHT_TASK_DOC_CYCLE_NOTE_KEY,
+        &next_cycle.to_string(),
+    );
+    Some(next_path)
 }
 pub fn lightweight_validate_config(
     task_doc_path: &str,

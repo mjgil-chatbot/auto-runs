@@ -256,6 +256,15 @@ pub enum ToolAccess {
     #[default]
     Execution,
 }
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct AgentProfile {
+    #[serde(default)]
+    pub role: AgentRole,
+    #[serde(default)]
+    pub model_class: ModelClass,
+    #[serde(default)]
+    pub tool_access: ToolAccess,
+}
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct TaskExecutionReport {
     #[serde(default)]
@@ -506,6 +515,16 @@ pub struct CoordinationEvent {
     pub message: String,
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AgentPresence {
+    pub provider: String,
+    pub instance_number: Option<u32>,
+    pub instance_pid: u32,
+    pub current_load: usize,
+    #[serde(default)]
+    pub visible_workspaces: Vec<String>,
+    pub last_heartbeat_at: DateTime<Utc>,
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TaskArtifact {
     pub run_id: String,
     pub task_id: String,
@@ -567,6 +586,98 @@ pub struct UpsertRunInput {
     pub council_turn_policy: Option<TurnPolicy>,
     pub council_max_turns: Option<u32>,
 }
+#[derive(Clone, Debug)]
+pub struct PresenceInput {
+    pub provider: String,
+    pub instance_number: Option<u32>,
+    pub instance_pid: u32,
+    pub current_load: usize,
+    pub visible_workspaces: Vec<String>,
+}
+#[derive(Clone, Debug)]
+pub struct CoordinationRunSnapshot {
+    pub run: CoordinationRun,
+    pub tasks: Vec<CoordinationTask>,
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct LightweightTaskDocumentRecord {
+    pub active_path: String,
+    pub next_path: String,
+    pub status_path: String,
+    pub cycle: u32,
+    pub updated_at: DateTime<Utc>,
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct LightweightSourceTaskRecord {
+    pub source_task_id: String,
+    pub source_path: String,
+    #[serde(default)]
+    pub section_path: Vec<String>,
+    pub title: String,
+    pub completed: bool,
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct LightweightExecutionTaskRecord {
+    pub execution_task_id: String,
+    pub parent_task_id: Option<String>,
+    pub title: String,
+    pub kind: CoordinationTaskKind,
+    pub status: CoordinationTaskStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_category: Option<TaskCategory>,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    #[serde(default)]
+    pub read_scope: Vec<String>,
+    #[serde(default)]
+    pub write_scope: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<TaskFailureKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_action: Option<TaskRecoveryAction>,
+    pub attempt_count: u32,
+    pub max_attempts: u32,
+    pub publish_attempt_count: u32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LightweightPassStatus {
+    Active,
+    Completed,
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct LightweightPassRecord {
+    pub pass_id: String,
+    pub cycle: u32,
+    pub task_doc_path: String,
+    pub status: LightweightPassStatus,
+    #[serde(default)]
+    pub source_task_ids: Vec<String>,
+    #[serde(default)]
+    pub execution_task_ids: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct LightweightBrokerSnapshot {
+    pub run_id: String,
+    pub run_status: CoordinationRunStatus,
+    pub design_doc_path: String,
+    pub task_document: LightweightTaskDocumentRecord,
+    pub source_tasks_path: String,
+    pub source_task_count: usize,
+    pub execution_tasks_path: String,
+    pub execution_task_count: usize,
+    pub passes_path: String,
+    pub pass_count: usize,
+    pub refreshed_at: DateTime<Utc>,
+}
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaimLifecyclePhase {
@@ -577,6 +688,16 @@ pub enum ClaimLifecyclePhase {
     TaskExecutionStarted,
     WorkerExited,
 }
+impl ClaimLifecyclePhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Claimed => "claimed",
+            Self::WorkerSpawned => "worker_spawned",
+            Self::WorkerAdopted => "worker_adopted",
+            Self::TaskExecutionStarted => "task_execution_started",
+            Self::WorkerExited => "worker_exited",
+        }
+    }}
 pub fn default_design_doc_path() -> String {
     crate::default_design_doc_path_for_workflow(&AutonomousWorkflowMode::default())
 }
@@ -617,6 +738,12 @@ pub fn effective_dependency_generation(task: &CoordinationTask) -> u32 {
     task.dependency_generation
         .unwrap_or(task.execution_generation)
 }
+pub fn worker_heartbeat_stale_at(last_heartbeat_at: DateTime<Utc>) -> DateTime<Utc> {
+    last_heartbeat_at + chrono::Duration::seconds(TASK_HEARTBEAT_STALE_SECS)
+}
+pub fn claim_heartbeat_stale_at(claim: &TaskClaim) -> DateTime<Utc> {
+    worker_heartbeat_stale_at(claim.last_heartbeat_at)
+}
 pub fn normalize_task_estimated_minutes(
     estimated_minutes: Option<u32>,
     kind: &CoordinationTaskKind,
@@ -625,3 +752,36 @@ pub fn normalize_task_estimated_minutes(
         .unwrap_or_else(|| default_task_estimated_minutes_for_kind(kind))
         .clamp(MIN_TASK_ESTIMATED_MINUTES, MAX_TASK_ESTIMATED_MINUTES)
 }
+/// Typed errors returned by [`heartbeat_claim`] so callers can distinguish
+/// transient I/O failures from ownership-loss events without string matching.
+#[derive(Debug)]
+pub enum ClaimError {
+    /// The claim file is gone — another process already cleaned it up.
+    NoLongerExists {
+        task_id: String,
+        run_id: String,
+        source: anyhow::Error,
+    },
+    /// The claim exists but is held by a different PID.
+    OwnedByOtherPid {
+        task_id: String,
+        run_id: String,
+        other_pid: u32,
+        instance_pid: u32,
+    },
+}
+impl std::fmt::Display for ClaimError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoLongerExists { task_id, run_id, source } => write!(
+                f,
+                "heartbeat failed for task {task_id} in run {run_id}: claim no longer exists ({source})"
+            ),
+            Self::OwnedByOtherPid { task_id, run_id, other_pid, instance_pid } => write!(
+                f,
+                "heartbeat failed for task {task_id} in run {run_id}: claim owned by PID {other_pid}, not {instance_pid}"
+            ),
+        }
+    }
+}
+impl std::error::Error for ClaimError {}

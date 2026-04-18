@@ -235,6 +235,53 @@ pub enum RestartMode {
     Manual,
     AutoSelfHeal,
 }
+pub fn maybe_auto_fix_failed_run(run_id: &str, run: &mut CoordinationRun) -> Result<bool> {
+    // Provider outages need operator intervention, not repository repair.
+    // Recognize legacy persisted failures that predate typed failure metadata.
+    if load_tasks(run_id)?.iter().any(|task| {
+        task.status == CoordinationTaskStatus::Failed
+            && (task
+                .artifact_summary
+                .as_deref()
+                .is_some_and(is_pre_execution_rail_failure)
+                || task.attempt_count >= super::claims::AUTO_REPAIR_MAX_ATTEMPTS
+                || task.failure_kind == Some(TaskFailureKind::ProviderUnavailable)
+                || task.artifact_summary.as_deref().is_some_and(|message| {
+                    infer_failure_kind(message) == TaskFailureKind::ProviderUnavailable
+                }))
+    }) {
+        return Ok(false);
+    }
+    let restart_limit = auto_fix_failed_run_restart_limit(run);
+    if restart_limit == 0 {
+        return Ok(false);
+    }
+
+    let used_restarts = auto_fix_failed_run_restarts_used(run);
+    if used_restarts >= restart_limit {
+        return Ok(false);
+    }
+
+    let next_restart = used_restarts.saturating_add(1);
+    run.notes = notes_with_setting(
+        &run.notes,
+        AUTO_FIX_FAILED_RUN_RESTARTS_USED_NOTE_KEY,
+        &next_restart.to_string(),
+    );
+    run.updated_at = Utc::now();
+    write_json_atomic(&run_path(run_id), run)?;
+    index_run(run);
+    append_event(
+        run_id,
+        "run_auto_fix_restart_scheduled",
+        None,
+        &format!(
+            "Automatic self-heal scheduled restart {}/{} after run failure.",
+            next_restart, restart_limit
+        ),
+    )?;
+    Ok(true)
+}
 pub fn auto_fix_failed_run_restart_limit(run: &CoordinationRun) -> u32 {
     if let Some(limit) = note_setting_value(&run.notes, AUTO_FIX_FAILED_RUN_RESTART_LIMIT_NOTE_KEY)
         .and_then(|value| value.parse::<u32>().ok())

@@ -33,6 +33,19 @@ mod claims_completion;
 mod claims_scan;
 use super::*;
 use claims_scan::load_claim_from_entry;
+pub fn write_presence(input: PresenceInput) -> Result<AgentPresence> {
+    fs::create_dir_all(presence_dir())?;
+    let presence = AgentPresence {
+        provider: input.provider,
+        instance_number: input.instance_number,
+        instance_pid: input.instance_pid,
+        current_load: input.current_load,
+        visible_workspaces: input.visible_workspaces,
+        last_heartbeat_at: Utc::now(),
+    };
+    write_json_atomic(&presence_path(presence.instance_pid), &presence)?;
+    Ok(presence)
+}
 fn snapshot_lightweight_task_doc_before_write(
     _run_id: &str,
     run: &CoordinationRun,

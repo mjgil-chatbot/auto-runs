@@ -179,3 +179,79 @@ fn reconcile_completed_task_artifacts(
     }
     Ok(changed)
 }
+fn ensure_publish_repair_task(
+    run: &mut CoordinationRun,
+    tasks: &mut Vec<CoordinationTask>,
+    source_task: &CoordinationTask,
+    error_message: &str,
+) -> Result<bool> {
+    if source_task.title.starts_with("Repair git publish for ") {
+        return Ok(false);
+    }
+    let title = format!("Repair git publish for {}", source_task.title);
+    if tasks.iter().any(|task| {
+        task.parent_task_id.as_deref() == Some(source_task.task_id.as_str()) && task.title == title
+    }) {
+        return Ok(false);
+    }
+
+    let now = Utc::now();
+    let task_id = Uuid::new_v4().to_string();
+    let repair_task = CoordinationTask {
+        task_id: task_id.clone(),
+        run_id: run.run_id.clone(),
+        parent_task_id: Some(source_task.task_id.clone()),
+        kind: CoordinationTaskKind::GeneratedWriteTask,
+        assigned_provider: source_task.assigned_provider.clone(),
+        task_category: source_task.task_category,
+        provider_hint: source_task.provider_hint.clone(),
+        required_role: source_task.required_role,
+        iteration: None,
+        title: title.clone(),
+        prompt: format!(
+            "The runtime could not finish automatic git publish for the completed task `{}`.\n\nStart from the current workspace state and fix the publish blocker with the smallest possible change.\n- Inspect git status, commit history, branch state, and remote state.\n- If code changes are already correct, avoid unnecessary edits and focus on the publish blocker.\n- Rerun the most relevant local checks before finishing.\n\nLatest publish failure:\n{}",
+            source_task.title, error_message
+        ),
+        cwd: source_task.cwd.clone(),
+        allowed_tools: source_task.allowed_tools.clone(),
+        read_scope: source_task.read_scope.clone(),
+        write_scope: source_task.write_scope.clone(),
+        acceptance_checks: source_task.acceptance_checks.clone(),
+        review_metadata: None,
+        dependencies: vec![source_task.task_id.clone()],
+        execution_generation: source_task.execution_generation,
+        dependency_generation: Some(effective_dependency_generation(source_task)),
+        attempt_count: 0,
+        max_attempts: source_task.max_attempts.max(1),
+        publish_attempt_count: 0,
+        estimated_minutes: source_task.estimated_minutes,
+        status: CoordinationTaskStatus::Queued,
+        claimed_by: None,
+        artifact_summary: None,
+        failure_kind: None,
+        recovery_action: None,
+        created_at: now,
+        updated_at: now,
+    };
+
+    run.task_ids.push(task_id.clone());
+    run.updated_at = now;
+    write_json_atomic(&run_path(&run.run_id), run)?;
+    index_run(run);
+    write_json_atomic(&task_path(&run.run_id, &task_id), &repair_task)?;
+    index_task(&repair_task);
+    tasks.push(repair_task);
+    append_event_with_provider(
+        &run.run_id,
+        "task_repair_scheduled",
+        Some(&task_id),
+        source_task.assigned_provider.as_deref(),
+        source_task.task_category,
+        source_task.provider_hint.as_deref(),
+        &format!(
+            "Created publish repair task for {}. {}",
+            source_task.title, error_message
+        ),
+    )?;
+    Ok(true)
+}
