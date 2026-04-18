@@ -99,3 +99,28 @@ pub(crate) fn append_runsc_ready_event(
         ),
     )
 }
+fn collect_typed_validation_errors(
+    task: &CoordinationTask,
+    contract: &TaskContract,
+    response: &str,
+) -> Vec<String> {
+    validate_contract_response_for_task(contract, response, task)
+}
+fn append_reask_event(
+    run_id: &str,
+    task_id: &str,
+    provider_name: &str,
+    reask: &ValidationReask,
+    attempt: u32,
+) -> Result<()> {
+    let event = reask_event(task_id, Some(provider_name), reask, attempt);
+    append_event_with_provider(
+        run_id,
+        &event.event_type,
+        event.task_id.as_deref(),
+        event.provider.as_deref(),
+        event.category,
+        event.fallback_from.as_deref(),
+        &event.message,
+    )
+}

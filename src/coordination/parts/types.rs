@@ -36,11 +36,22 @@ use std::time::Duration;
 use uuid::Uuid;
 /// Worker heartbeat interval in seconds.
 pub const TASK_HEARTBEAT_SECS: u64 = 60;
+/// Worker heartbeat staleness threshold in seconds. If the worker fails to
+/// heartbeat inside this window, the launcher/driver should treat it as dead.
+pub const TASK_HEARTBEAT_STALE_SECS: i64 = 5 * 60;
 /// Default maximum number of attempts before a task is considered permanently failed.
 pub const DEFAULT_TASK_MAX_ATTEMPTS: u32 = 3;
 pub const DEFAULT_GENERATED_TASK_ESTIMATED_MINUTES: u32 = 15;
 pub const MIN_TASK_ESTIMATED_MINUTES: u32 = 1;
 pub const MAX_TASK_ESTIMATED_MINUTES: u32 = 180;
+/// System prompt injected to all provider task executions.
+pub const TASK_SYSTEM_PROMPT: &str =
+    "You are executing one task inside an autonomous coordination run. Use the task prompt and dependency artifacts. If the task declares a non-empty write scope, you may modify files only inside that declared write scope. If the task says to return JSON only, return exactly one JSON object and put any markdown, code, or file contents inside the JSON string fields, usually `details`. Do not emit raw markdown or commentary outside the JSON object. Be concise and action-oriented.";
+/// Path to the task report validation script.
+pub const TASK_REPORT_VALIDATOR: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/scripts/validate_autonomous_task_report.py"
+);
 pub fn effective_runsc_workspace_includes(
     run: &CoordinationRun,
     _task: Option<&CoordinationTask>,
@@ -56,6 +67,37 @@ pub fn effective_runsc_workspace_includes(
     }
     includes
 }
+pub fn scope_to_runsc_include(workspace_root: &Path, scope: &str) -> Option<String> {
+    let trimmed = scope.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if matches!(trimmed, "." | "*" | "**") {
+        return Some(".".to_string());
+    }
+
+    let prefix = trimmed
+        .find('*')
+        .map(|idx| &trimmed[..idx])
+        .unwrap_or(trimmed)
+        .trim_end_matches('/');
+    if prefix.is_empty() {
+        return Some(".".to_string());
+    }
+
+    let candidate = Path::new(prefix);
+    let mut widest_existing: Option<&Path> = None;
+    for ancestor in candidate.ancestors() {
+        if ancestor.as_os_str().is_empty() || ancestor == Path::new(".") {
+            break;
+        }
+        if workspace_root.join(ancestor).exists() {
+            widest_existing = Some(ancestor);
+        }
+    }
+
+    widest_existing.map(|path| path.to_string_lossy().into_owned())
+}
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CoordinationRunStatus {
@@ -69,6 +111,19 @@ pub enum CoordinationRunStatus {
     Failed,
     Canceled,
 }
+impl CoordinationRunStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Planning => "planning",
+            Self::Active => "active",
+            Self::Recovering => "recovering",
+            Self::WaitingForArtifacts => "waiting_for_artifacts",
+            Self::WaitingForPolicy => "waiting_for_policy",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Canceled => "canceled",
+        }
+    }}
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CoordinationTaskStatus {
@@ -115,6 +170,16 @@ pub enum CoordinationTaskOutcome {
     Partial,
     Failed,
 }
+impl CoordinationTaskOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CompletedWithChanges => "completed_with_changes",
+            Self::CompletedNoChange => "completed_no_change",
+            Self::Blocked => "blocked",
+            Self::Partial => "partial",
+            Self::Failed => "failed",
+        }
+    }}
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskFailureKind {
@@ -140,6 +205,10 @@ pub enum TaskRecoveryAction {
     ReconcileState,
     ManualIntervention,
 }
+pub const PROVIDER_CAPABILITY_REGISTRY_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/workflow-registry/providers.json"
+);
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskCategory {
@@ -153,6 +222,13 @@ pub enum TaskCategory {
     Verify,
     DocWrite,
     Research,
+}
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptFamily {
+    #[default]
+    Mechanics,
+    Principles,
 }
 pub use auto_runs_contracts::AgentRole;
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]

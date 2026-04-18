@@ -30,6 +30,231 @@ use std::thread;
 use std::time::Duration;
 #[allow(unused_imports)]
 use uuid::Uuid;
+#[rustfmt::skip]
+pub fn build_provider_task_artifact(task: &CoordinationTask, response: &str) -> Result<TaskArtifact> {
+    if let Some(artifact) = build_lightweight_execution_artifact(task, response) {
+        return Ok(artifact);
+    }
+    let review_metadata = load_review_task_metadata(&task.run_id, &task.task_id);
+    let typed_envelope = lookup_contract(task.kind)
+        .and_then(|_| parse_contract_envelope_from_response(response).ok());
+    if task.kind == CoordinationTaskKind::ReviewArtifacts && review_metadata.is_some() {
+        let review_response = code_review::parse_review_response(response)?;
+        if let Some(metadata) = review_metadata.as_ref() {
+            code_review::validate_fix_mode(&review_response, metadata)?;
+        }
+        if !review_response.report.fix_tasks.is_empty() {
+            validate_generated_task_specs(&review_response.report.fix_tasks)?;
+        }
+        let summary = if review_response.report.summary.trim().is_empty() {
+            task.title.clone()
+        } else {
+            review_response.report.summary.trim().to_string()
+        };
+        let artifact = TaskArtifact {
+            run_id: task.run_id.clone(),
+            task_id: task.task_id.clone(),
+            provider: task.assigned_provider.clone(),
+            task_category: task.task_category,
+            fallback_from: task.provider_hint.clone(),
+            summary,
+            body: serde_json::to_string_pretty(&review_response)?,
+            completed_at: Utc::now(),
+            report: review_response.report,
+        };
+        if let Some(envelope) = typed_envelope.as_ref() {
+            let _ = persist_artifact_contract_meta(
+                &task.run_id,
+                &task.task_id,
+                envelope.payload_kind.clone(),
+                envelope.contract_version,
+            );
+        }
+        return Ok(artifact);
+    }
+
+    let mut envelope_meta: Option<(TaskPayloadKind, u32)> = typed_envelope
+        .as_ref()
+        .map(|envelope| (envelope.payload_kind.clone(), envelope.contract_version));
+    let report = match task.kind {
+        CoordinationTaskKind::PlanFlatTasks => {
+            if let Some(envelope) = typed_envelope.as_ref() {
+                let payload = plan_tasks_payload_from_envelope(envelope)?;
+                validate_generated_task_specs(&payload.generated_tasks)?;
+                let mut report = typed_envelope_to_legacy_report(envelope);
+                if report.summary.trim().is_empty() {
+                    report.summary = format!(
+                        "Planned {} generated task slices.",
+                        payload.generated_tasks.len()
+                    );
+                }
+                if report.design_requirements_satisfied.is_empty() {
+                    report.design_requirements_satisfied = vec![
+                        "Returned machine-readable task slices.".to_string(),
+                        "Declared generated task scopes for runtime reconciliation."
+                            .to_string(),
+                    ];
+                }
+                report
+            } else if let Ok((legacy_report, None)) = try_parse_typed_or_legacy(response) {
+                legacy_report
+            } else {
+                let specs = parse_generated_task_specs(response, None)?;
+                validate_generated_task_specs(&specs)?;
+                TaskExecutionReport {
+                    outcome: CoordinationTaskOutcome::CompletedWithChanges,
+                    summary: format!("Planned {} generated task slices.", specs.len()),
+                    details: response.trim().to_string(),
+                    design_requirements_satisfied: vec![
+                        "Returned machine-readable task slices.".to_string(),
+                        "Declared generated task scopes for runtime reconciliation."
+                            .to_string(),
+                    ],
+                    ..Default::default()
+                }
+            }
+        }
+        CoordinationTaskKind::RalphVerify => {
+            let verification = parse_ralph_verification(response, &task.run_id)?;
+            TaskExecutionReport {
+                outcome: if verification.complete {
+                    CoordinationTaskOutcome::CompletedNoChange
+                } else {
+                    CoordinationTaskOutcome::Partial
+                },
+                summary: verification.reason.clone(),
+                details: verification.reason,
+                remaining_gaps: if verification.complete {
+                    Vec::new()
+                } else {
+                    vec!["Completion criteria not yet satisfied.".to_string()]
+                },
+                ..Default::default()
+            }
+        }
+        CoordinationTaskKind::RalphExecute => {
+            let exec_result = parse_ralph_execution(response, &task.run_id)?;
+            TaskExecutionReport {
+                outcome: exec_result.outcome.clone(),
+                summary: exec_result.summary.clone(),
+                details: exec_result.reason.clone(),
+                changed_files: normalize_path_list(exec_result.changed_files),
+                blockers: exec_result.blockers,
+                warnings: Vec::new(),
+                tests_run: Vec::new(),
+                remaining_gaps: Vec::new(),
+                design_requirements_satisfied: Vec::new(),
+                validation_errors: Vec::new(),
+                fix_tasks: Vec::new(),
+                failure_kind: None,
+                recovery_action: None,
+            }
+        }
+        CoordinationTaskKind::PerfBaseline => perf_baseline_report(response)
+            .unwrap_or_else(|err| malformed_task_execution_report(response, &err)),
+        CoordinationTaskKind::PerfParse => {
+            if let Some(envelope) = typed_envelope.as_ref() {
+                let mut report = typed_envelope_to_legacy_report(envelope);
+                let payload_errors = validate_typed_payload(envelope);
+                if !payload_errors.is_empty() {
+                    report.validation_errors.extend(payload_errors);
+                }
+                report
+            } else if let Ok((legacy_report, None)) = try_parse_typed_or_legacy(response) {
+                legacy_report
+            } else {
+                perf_parse_report(response)
+                    .unwrap_or_else(|err| malformed_task_execution_report(response, &err))
+            }
+        }
+        CoordinationTaskKind::PerfBench => perf_bench_report(response)
+            .unwrap_or_else(|err| malformed_task_execution_report(response, &err)),
+        CoordinationTaskKind::PerfEvaluate => perf_evaluate_report(response)
+            .unwrap_or_else(|err| malformed_task_execution_report(response, &err)),
+        _ => match try_parse_typed_or_legacy(response) {
+            Ok((mut r, Some(envelope))) => {
+                let payload_errors = validate_typed_payload(&envelope);
+                if !payload_errors.is_empty() {
+                    for err in &payload_errors {
+                        warn!("typed payload validation: {}", err);
+                    }
+                    r.validation_errors.extend(payload_errors);
+                }
+                r.changed_files = normalize_path_list(r.changed_files);
+                envelope_meta = Some((envelope.payload_kind, envelope.contract_version));
+                r
+            }
+            Ok((r, None)) => r,
+            Err(err) => malformed_task_execution_report(response, &err),
+        },
+    };
+
+    let mut report = report;
+    if load_run(&task.run_id)
+        .ok()
+        .and_then(|run| {
+            LightweightWorkflowBehavior::for_run(&run)
+                .map(|behavior| behavior.tracks_changed_files())
+        })
+        .is_some_and(|tracks| !tracks)
+    {
+        report.changed_files.clear();
+    }
+
+    let summary = if report.summary.trim().is_empty() {
+        task.title.clone()
+    } else {
+        report.summary.trim().to_string()
+    };
+    let body = if let Some(envelope) = typed_envelope.as_ref() {
+        match envelope.payload_kind {
+            TaskPayloadKind::DesignDoc => design_doc_payload_from_envelope(envelope)
+                .map(|payload| payload.markdown)
+                .unwrap_or_else(|_| response.trim().to_string()),
+            TaskPayloadKind::PlanTasks => plan_tasks_payload_from_envelope(envelope)
+                .and_then(|payload| {
+                    serde_json::to_string_pretty(&payload.generated_tasks)
+                        .context("failed to serialize generated tasks payload")
+                })
+                .unwrap_or_else(|_| response.trim().to_string()),
+            TaskPayloadKind::PerfIdeas => perf_ideas_payload_from_envelope(envelope)
+                .and_then(|payload| {
+                    serde_json::to_string_pretty(&PerfIdeaList {
+                        ideas: payload.ideas,
+                    })
+                    .context("failed to serialize perf ideas payload")
+                })
+                .unwrap_or_else(|_| response.trim().to_string()),
+            _ => {
+                if report.details.trim().is_empty() {
+                    response.trim().to_string()
+                } else {
+                    report.details.clone()
+                }
+            }
+        }
+    } else if report.details.trim().is_empty() {
+        response.trim().to_string()
+    } else {
+        report.details.clone()
+    };
+
+    let artifact = TaskArtifact {
+        run_id: task.run_id.clone(),
+        task_id: task.task_id.clone(),
+        provider: task.assigned_provider.clone(),
+        task_category: task.task_category,
+        fallback_from: task.provider_hint.clone(),
+        summary,
+        body,
+        completed_at: Utc::now(),
+        report,
+    };
+    if let Some((kind, version)) = envelope_meta {
+        let _ = persist_artifact_contract_meta(&task.run_id, &task.task_id, kind, version);
+    }
+    Ok(artifact)
+}
 fn normalize_report_outcome(value: &mut Value) {
     normalize_provider_response(value);
 }
