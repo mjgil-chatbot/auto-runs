@@ -22,6 +22,8 @@ use crate::{
 #[path = "../code_review.rs"]
 mod code_review;
 pub mod council;
+#[cfg(test)]
+mod tests;
 #[path = "parts/types.rs"]
 pub mod types;
 pub use types::*;
@@ -50,6 +52,9 @@ pub use provider_execution::*;
 #[path = "parts/provider_execution_helpers.rs"]
 pub mod provider_execution_helpers;
 pub use provider_execution_helpers::*;
+#[path = "parts/workspace_activity.rs"]
+pub mod workspace_activity;
+pub use workspace_activity::*;
 #[path = "parts/provider_contracts.rs"]
 pub mod provider_contracts;
 pub use provider_contracts::*;
