@@ -420,6 +420,27 @@ pub struct TaskArtifact {
     #[serde(default)]
     pub report: TaskExecutionReport,
 }
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinationMutationKind {
+    CompleteTask,
+    RestartFailedTasks,
+    PublishWorkspaceDelta,
+    ReconcileRun,
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CoordinationMutationBatch {
+    pub batch_id: String,
+    pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub kind: CoordinationMutationKind,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub notes: String,
+}
 #[derive(Clone, Debug)]
 pub struct UpsertRunInput {
     pub existing_run_id: Option<String>,

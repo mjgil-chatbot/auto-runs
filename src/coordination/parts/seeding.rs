@@ -1,6 +1,10 @@
 use super::*;
 #[allow(unused_imports)]
+use crate::config;
+#[allow(unused_imports)]
 use crate::AutonomousExecutionEnvironment;
+#[allow(unused_imports)]
+use crate::ReviewScope;
 #[allow(unused_imports)]
 use anyhow::{Context, Result};
 #[allow(unused_imports)]
@@ -32,3 +36,4 @@ use std::time::Duration;
 use uuid::Uuid;
 include!("seeding_core.rs");
 include!("seeding_routing.rs");
+include!("seeding_tests.rs");

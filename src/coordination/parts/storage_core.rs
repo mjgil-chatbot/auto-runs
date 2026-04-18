@@ -23,6 +23,27 @@ pub fn claims_dir(run_id: &str) -> PathBuf {
 pub fn claim_path(run_id: &str, task_id: &str) -> PathBuf {
     claims_dir(run_id).join(format!("{task_id}.json"))
 }
+pub fn claim_task_doc_snapshot_path(run_id: &str, task_id: &str) -> PathBuf {
+    claims_dir(run_id).join(format!("{task_id}.task-doc-snapshot.md"))
+}
+pub fn mutation_batches_dir(run_id: &str) -> PathBuf {
+    run_dir(run_id).join("mutations")
+}
+pub fn mutation_batch_path(run_id: &str, batch_id: &str) -> PathBuf {
+    mutation_batches_dir(run_id).join(format!("{batch_id}.json"))
+}
+pub fn lightweight_broker_snapshot_path(run_id: &str) -> PathBuf {
+    run_dir(run_id).join("lightweight_broker.json")
+}
+pub fn lightweight_source_tasks_path(run_id: &str) -> PathBuf {
+    run_dir(run_id).join("lightweight_source_tasks.json")
+}
+pub fn lightweight_execution_tasks_path(run_id: &str) -> PathBuf {
+    run_dir(run_id).join("lightweight_execution_tasks.json")
+}
+pub fn lightweight_passes_path(run_id: &str) -> PathBuf {
+    run_dir(run_id).join("lightweight_passes.json")
+}
 pub fn events_path(run_id: &str) -> PathBuf {
     run_dir(run_id).join("events.jsonl")
 }
@@ -41,6 +62,58 @@ pub(crate) fn council_lock_path(run_id: &str) -> PathBuf {
 /// Alias used by the council submodule.
 pub(crate) fn ledger_path(run_id: &str) -> PathBuf {
     council_ledger_path(run_id)
+}
+/// Create the council-specific on-disk layout and write the initial CouncilRun state.
+pub fn seed_council_run(run: &CoordinationRun) -> Result<()> {
+    let max_turns = run.council_max_turns.unwrap_or(40);
+    let council_state = council::CouncilRun {
+        run_id: run.run_id.clone(),
+        root_chat_id: run.root_chat_id.clone(),
+        workspace_path: run.workspace_path.clone(),
+        goal: run.goal.clone(),
+        completion_criteria: run.completion_criteria.clone(),
+        status: council::CouncilRunStatus::Active,
+        turn_policy: run.council_turn_policy.clone().unwrap_or_default(),
+        max_turns,
+        current_turn: 0,
+        active_claims: Vec::new(),
+        revoked_claims: Vec::new(),
+        votes_complete: Vec::new(),
+        turns_since_progress: 0,
+        total_work_reports: 0,
+        created_at: run.created_at,
+        updated_at: run.updated_at,
+        allow_write_tasks: run.allow_write_tasks,
+        notes: run.notes.clone(),
+        termination_policy: council::CouncilTerminationPolicy::for_max_turns(max_turns),
+    };
+
+    write_json_atomic(&council_json_path(&run.run_id), &council_state)?;
+
+    // Create empty ledger file
+    let ledger_path = council_ledger_path(&run.run_id);
+    if !ledger_path.exists() {
+        fs::File::create(&ledger_path)
+            .with_context(|| format!("failed to create {}", ledger_path.display()))?;
+    }
+
+    // Ensure claims and artifacts dirs exist (shared with task-based runs)
+    fs::create_dir_all(claims_dir(&run.run_id))?;
+    fs::create_dir_all(artifacts_dir(&run.run_id))?;
+
+    append_event(
+        &run.run_id,
+        "council_seeded",
+        None,
+        &format!(
+            "Seeded Freeform Council: goal={}, turn_policy={}, max_turns={}",
+            run.goal,
+            run.council_turn_policy.as_ref().map(|p| p.as_str()).unwrap_or("default"),
+            run.council_max_turns.unwrap_or(40)
+        ),
+    )?;
+
+    Ok(())
 }
 pub fn load_events(
     run_id: &str,
@@ -82,6 +155,37 @@ pub fn load_events(
     }
 
     Ok(events)
+}
+pub fn presence_dir() -> PathBuf {
+    coordination_root_dir().join("presence")
+}
+pub fn presence_path(instance_pid: u32) -> PathBuf {
+    presence_dir().join(format!("{instance_pid}.json"))
+}
+pub fn create_claim_file(claim: &TaskClaim) -> Result<bool> {
+    fs::create_dir_all(claims_dir(&claim.run_id))?;
+    let path = claim_path(&claim.run_id, &claim.task_id);
+    let json = serde_json::to_string_pretty(claim)?;
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            file.write_all(json.as_bytes())?;
+            Ok(true)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Emit a contention event for observability — does not fail the claim attempt.
+            let msg = format!(
+                "claim contention on task {} by instance {} for provider {} — another instance won",
+                claim.task_id, claim.instance_pid, claim.provider
+            );
+            let _ = append_event(&claim.run_id, "claim_contention", Some(&claim.task_id), &msg);
+            Ok(false)
+        }
+        Err(err) => Err(err.into()),
+    }
 }
 pub fn append_event(
     run_id: &str,
@@ -140,6 +244,35 @@ pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let json = serde_json::to_string_pretty(value)?;
     crate::storage::atomic::atomic_write(path, json.as_bytes())?;
     Ok(())
+}
+pub fn begin_mutation_batch(
+    run_id: &str,
+    task_id: Option<&str>,
+    kind: CoordinationMutationKind,
+    notes: impl Into<String>,
+) -> Result<CoordinationMutationBatch> {
+    let batch = CoordinationMutationBatch {
+        batch_id: Uuid::new_v4().to_string(),
+        run_id: run_id.to_string(),
+        task_id: task_id.map(str::to_string),
+        kind,
+        created_at: Utc::now(),
+        completed_at: None,
+        notes: notes.into(),
+    };
+    write_json_atomic(&mutation_batch_path(run_id, &batch.batch_id), &batch)?;
+    Ok(batch)
+}
+pub fn complete_mutation_batch(batch: &mut CoordinationMutationBatch) -> Result<()> {
+    batch.completed_at = Some(Utc::now());
+    write_json_atomic(&mutation_batch_path(&batch.run_id, &batch.batch_id), batch)
+}
+pub fn write_review_task_metadata(
+    run_id: &str,
+    task_id: &str,
+    metadata: &code_review::ReviewTaskMetadata,
+) -> Result<()> {
+    write_json_atomic(&review_metadata_path(run_id, task_id), metadata)
 }
 pub fn load_review_task_metadata(
     run_id: &str,
@@ -207,6 +340,144 @@ pub fn format_lines(lines: &[String]) -> String {
     }
 }
 use crate::storage::index::StorageIndex;
+#[derive(Default)]
+pub struct RunQuery {
+    pub run_id: Option<String>,
+    pub provider: Option<String>,
+    pub status: Option<String>,
+    pub workflow_mode: Option<String>,
+    pub created_after: Option<DateTime<Utc>>,
+    pub created_before: Option<DateTime<Utc>>,
+    pub limit: Option<usize>,
+}
+pub struct RunRecord {
+    pub run_id: String,
+    pub provider: Option<String>,
+    pub goal: Option<String>,
+    pub status: String,
+    pub workflow_mode: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+#[derive(Default)]
+pub struct CoordinationEventQuery {
+    pub run_id: Option<String>,
+    pub event_type: Option<String>,
+    pub provider: Option<String>,
+    pub at_after: Option<DateTime<Utc>>,
+    pub at_before: Option<DateTime<Utc>>,
+    pub limit: Option<usize>,
+}
+pub struct CoordinationEventRecord {
+    pub id: i64,
+    pub run_id: String,
+    pub event_type: String,
+    pub task_id: Option<String>,
+    pub provider: Option<String>,
+    pub category: Option<String>,
+    pub fallback_from: Option<String>,
+    pub message: Option<String>,
+    pub at: String,
+}
+pub fn list_runs_from_index(idx: &StorageIndex, query: &RunQuery) -> Result<Vec<RunRecord>> {
+    let conn = idx.connection();
+    let mut sql = String::from(
+        "SELECT run_id, provider, goal, status, workflow_mode, created_at, updated_at FROM runs WHERE 1=1",
+    );
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(ref run_id) = query.run_id {
+        sql.push_str(" AND run_id = ?");
+        params.push(Box::new(run_id.clone()));
+    }
+    if let Some(ref provider) = query.provider {
+        sql.push_str(" AND provider = ?");
+        params.push(Box::new(provider.clone()));
+    }
+    if let Some(ref status) = query.status {
+        sql.push_str(" AND status = ?");
+        params.push(Box::new(status.clone()));
+    }
+    if let Some(ref workflow_mode) = query.workflow_mode {
+        sql.push_str(" AND workflow_mode = ?");
+        params.push(Box::new(workflow_mode.clone()));
+    }
+    if let Some(created_after) = query.created_after {
+        sql.push_str(" AND created_at >= ?");
+        params.push(Box::new(created_after.to_rfc3339()));
+    }
+    if let Some(created_before) = query.created_before {
+        sql.push_str(" AND created_at <= ?");
+        params.push(Box::new(created_before.to_rfc3339()));
+    }
+    sql.push_str(" ORDER BY created_at DESC");
+    if let Some(limit) = query.limit {
+        sql.push_str(&format!(" LIMIT {}", limit));
+    }
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(param_refs.as_slice(), |row| {
+        Ok(RunRecord {
+            run_id: row.get(0)?,
+            provider: row.get(1)?,
+            goal: row.get(2)?,
+            status: row.get(3)?,
+            workflow_mode: row.get(4)?,
+            created_at: row.get(5)?,
+            updated_at: row.get(6)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(anyhow::Error::from)
+}
+pub fn list_events_from_index(
+    idx: &StorageIndex,
+    query: &CoordinationEventQuery,
+) -> Result<Vec<CoordinationEventRecord>> {
+    let conn = idx.connection();
+    let mut sql = String::from(
+        "SELECT rowid, run_id, event_type, task_id, provider, category, fallback_from, message, at FROM coordination_event WHERE 1=1",
+    );
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(ref run_id) = query.run_id {
+        sql.push_str(" AND run_id = ?");
+        params.push(Box::new(run_id.clone()));
+    }
+    if let Some(ref event_type) = query.event_type {
+        sql.push_str(" AND event_type = ?");
+        params.push(Box::new(event_type.clone()));
+    }
+    if let Some(ref provider) = query.provider {
+        sql.push_str(" AND provider = ?");
+        params.push(Box::new(provider.clone()));
+    }
+    if let Some(at_after) = query.at_after {
+        sql.push_str(" AND at >= ?");
+        params.push(Box::new(at_after.to_rfc3339()));
+    }
+    if let Some(at_before) = query.at_before {
+        sql.push_str(" AND at <= ?");
+        params.push(Box::new(at_before.to_rfc3339()));
+    }
+    sql.push_str(" ORDER BY at DESC");
+    if let Some(limit) = query.limit {
+        sql.push_str(&format!(" LIMIT {}", limit));
+    }
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(param_refs.as_slice(), |row| {
+        Ok(CoordinationEventRecord {
+            id: row.get(0)?,
+            run_id: row.get(1)?,
+            event_type: row.get(2)?,
+            task_id: row.get(3)?,
+            provider: row.get(4)?,
+            category: row.get(5)?,
+            fallback_from: row.get(6)?,
+            message: row.get(7)?,
+            at: row.get(8)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(anyhow::Error::from)
+}
 /// Obtain a shared StorageIndex, returning None when the database is
 /// unavailable (e.g. first launch before any directory exists).  Because
 /// `StorageIndex::open()` calls `open_index()` → `ensure_schema()`, the
@@ -298,5 +569,57 @@ pub fn index_coordination_event(run_id: &str, event: &CoordinationEvent) {
         ],
     ) {
         debug!("index_coordination_event failed for {}: {}", run_id, err);
+    }
+}
+/// A run summary row returned by coordination queries.
+#[derive(Debug, Clone)]
+pub struct RunSummaryRow {
+    pub run_id: String,
+    pub provider: String,
+    pub goal: String,
+    pub status: String,
+    pub workflow_mode: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+impl From<RunRecord> for RunSummaryRow {
+    fn from(r: RunRecord) -> Self {
+        Self {
+            run_id: r.run_id,
+            provider: r.provider.unwrap_or_default(),
+            goal: r.goal.unwrap_or_default(),
+            status: r.status,
+            workflow_mode: r.workflow_mode,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }
+    }
+}
+/// An event row returned by coordination queries.
+#[derive(Debug, Clone)]
+pub struct EventRow {
+    pub id: i64,
+    pub run_id: String,
+    pub event_type: String,
+    pub task_id: Option<String>,
+    pub provider: Option<String>,
+    pub category: Option<String>,
+    pub fallback_from: Option<String>,
+    pub message: Option<String>,
+    pub at: String,
+}
+impl From<CoordinationEventRecord> for EventRow {
+    fn from(r: CoordinationEventRecord) -> Self {
+        Self {
+            id: r.id,
+            run_id: r.run_id,
+            event_type: r.event_type,
+            task_id: r.task_id,
+            provider: r.provider,
+            category: r.category,
+            fallback_from: r.fallback_from,
+            message: r.message,
+            at: r.at,
+        }
     }
 }

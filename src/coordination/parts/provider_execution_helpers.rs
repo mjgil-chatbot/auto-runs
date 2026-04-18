@@ -60,6 +60,26 @@ pub fn provider_task_timeout(provider_name: &str, task: &CoordinationTask) -> Op
         None => Some(estimate_timeout),
     }
 }
+pub fn provider_timeout_failure(provider_name: &str, timeout: Duration) -> String {
+    format!(
+        "{} task timed out after {}.",
+        provider_display_name(provider_name),
+        format_duration(timeout)
+    )
+}
+fn provider_display_name(provider_name: &str) -> &str {
+    match provider_name {
+        "claude" => "Claude",
+        "codex" => "Codex",
+        "gemini" => "Gemini",
+        "glm" => "GLM",
+        "minimax" => "MiniMax",
+        "nemotron" => "Nemotron",
+        "nvidia" => "Nvidia",
+        "qwen" => "Qwen",
+        other => other,
+    }
+}
 fn format_duration(duration: Duration) -> String {
     let secs = duration.as_secs();
     if secs % 60 == 0 {

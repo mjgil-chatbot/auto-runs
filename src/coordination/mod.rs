@@ -92,6 +92,8 @@ pub use generated_tasks::*;
 #[path = "parts/task_contracts.rs"]
 pub mod task_contracts;
 pub use task_contracts::*;
+#[path = "parts/structured_generation.rs"]
+pub mod structured_generation;
 #[path = "parts/interrupts.rs"]
 pub mod interrupts;
 pub use interrupts::*;

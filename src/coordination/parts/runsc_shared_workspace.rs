@@ -1,14 +1,17 @@
 use super::*;
 use std::ffi::OsString;
+
 pub const AUTONOMOUS_RUNSC_SHARED_ROOT_ENV: &str = "RUST_CHATBOT_AUTONOMOUS_RUNSC_SHARED_ROOT";
 pub const AUTONOMOUS_RUNSC_DISABLE_SYNC_BACK_ENV: &str =
     "RUST_CHATBOT_AUTONOMOUS_RUNSC_DISABLE_SYNC_BACK";
+
 pub struct AutonomousRunscEnvGuard {
     previous_shared_root: Option<OsString>,
     previous_disable_sync_back: Option<OsString>,
     previous_execution_env: Option<OsString>,
     previous_workspace_includes: Option<OsString>,
 }
+
 impl AutonomousRunscEnvGuard {
     pub fn activate(run: &CoordinationRun) -> Result<Option<Self>> {
         if run.execution_environment != AutonomousExecutionEnvironment::Runsc {
@@ -37,13 +40,54 @@ impl AutonomousRunscEnvGuard {
             previous_execution_env,
             previous_workspace_includes,
         }))
-    }}
+    }
+}
+
+impl Drop for AutonomousRunscEnvGuard {
+    fn drop(&mut self) {
+        restore_env_var(
+            AUTONOMOUS_RUNSC_SHARED_ROOT_ENV,
+            self.previous_shared_root.as_ref(),
+        );
+        restore_env_var(
+            AUTONOMOUS_RUNSC_DISABLE_SYNC_BACK_ENV,
+            self.previous_disable_sync_back.as_ref(),
+        );
+        restore_env_var(
+            "RUST_CHATBOT_AUTONOMOUS_EXECUTION_ENV",
+            self.previous_execution_env.as_ref(),
+        );
+        restore_env_var(
+            "RUST_CHATBOT_AUTONOMOUS_RUNSC_WORKSPACE_INCLUDES",
+            self.previous_workspace_includes.as_ref(),
+        );
+    }
+}
+
+fn restore_env_var(key: &str, value: Option<&OsString>) {
+    match value {
+        Some(value) => std::env::set_var(key, value),
+        None => std::env::remove_var(key),
+    }
+}
+
 pub fn autonomous_runsc_shared_root(run_id: &str) -> PathBuf {
     run_dir(run_id).join("runsc-shared")
 }
+
 pub fn autonomous_runsc_workspace_root(run_id: &str) -> PathBuf {
     autonomous_runsc_shared_root(run_id).join("workspace")
 }
+
+pub fn reset_autonomous_runsc_workspace(run_id: &str) -> Result<()> {
+    let root = autonomous_runsc_shared_root(run_id);
+    if !root.exists() {
+        return Ok(());
+    }
+    fs::remove_dir_all(&root).with_context(|| format!("failed to remove {}", root.display()))?;
+    Ok(())
+}
+
 pub fn ensure_autonomous_runsc_workspace(run: &CoordinationRun) -> Result<PathBuf> {
     let shared_root = autonomous_runsc_shared_root(&run.run_id);
     let workspace_root = autonomous_runsc_workspace_root(&run.run_id);
@@ -67,6 +111,7 @@ pub fn ensure_autonomous_runsc_workspace(run: &CoordinationRun) -> Result<PathBu
     }
     Ok(shared_root)
 }
+
 pub fn apply_autonomous_runsc_env_to_command(
     command: &mut std::process::Command,
     run: &CoordinationRun,
@@ -79,6 +124,7 @@ pub fn apply_autonomous_runsc_env_to_command(
     command.env(AUTONOMOUS_RUNSC_DISABLE_SYNC_BACK_ENV, "1");
     Ok(())
 }
+
 pub fn task_runsc_materialization_root(task: &CoordinationTask) -> PathBuf {
     std::env::var_os(AUTONOMOUS_RUNSC_SHARED_ROOT_ENV)
         .filter(|value| !value.is_empty())
@@ -86,6 +132,23 @@ pub fn task_runsc_materialization_root(task: &CoordinationTask) -> PathBuf {
         .map(|root| root.join("workspace"))
         .unwrap_or_else(|| PathBuf::from(&task.cwd))
 }
+
+pub fn write_materialized_files_to_workspace(
+    task: &CoordinationTask,
+    files: &[MaterializedArtifactFile],
+) -> Result<()> {
+    for file in files {
+        let target = Path::new(&task.cwd).join(normalize_scope(&file.path));
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::write(&target, &file.content)
+            .with_context(|| format!("failed to write {}", target.display()))?;
+    }
+    Ok(())
+}
+
 fn populate_autonomous_runsc_workspace(run: &CoordinationRun, workspace_root: &Path) -> Result<()> {
     let source_root = Path::new(&run.workspace_path);
     for include in effective_runsc_workspace_includes(run, None) {
@@ -93,6 +156,7 @@ fn populate_autonomous_runsc_workspace(run: &CoordinationRun, workspace_root: &P
     }
     Ok(())
 }
+
 fn copy_autonomous_runsc_include_if_missing(
     source_root: &Path,
     workspace_root: &Path,
@@ -104,6 +168,7 @@ fn copy_autonomous_runsc_include_if_missing(
     }
     copy_autonomous_runsc_include(source_root, workspace_root, include)
 }
+
 fn copy_autonomous_runsc_include(
     source_root: &Path,
     workspace_root: &Path,
@@ -116,6 +181,7 @@ fn copy_autonomous_runsc_include(
     let target = workspace_root.join(include);
     copy_path(source, target)
 }
+
 fn copy_path(source: PathBuf, destination: PathBuf) -> Result<()> {
     let metadata = fs::symlink_metadata(&source)
         .with_context(|| format!("failed to stat {}", source.display()))?;
@@ -150,6 +216,7 @@ fn copy_path(source: PathBuf, destination: PathBuf) -> Result<()> {
         .with_context(|| format!("failed to set permissions on {}", destination.display()))?;
     Ok(())
 }
+
 fn copy_symlink(source: &Path, destination: &Path) -> Result<()> {
     let target = fs::read_link(source)
         .with_context(|| format!("failed to read symlink {}", source.display()))?;

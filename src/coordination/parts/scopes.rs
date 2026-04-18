@@ -1,8 +1,10 @@
 use std::path::{Component, Path};
+
 pub fn scopes_conflict(left: &[String], right: &[String]) -> bool {
     left.iter()
         .any(|lhs| right.iter().any(|rhs| scope_conflicts(lhs, rhs)))
 }
+
 pub fn scope_conflicts(left: &str, right: &str) -> bool {
     let lhs = normalize_scope(left);
     let rhs = normalize_scope(right);
@@ -24,6 +26,7 @@ pub fn scope_conflicts(left: &str, right: &str) -> bool {
             .map(|prefix| lhs.starts_with(&prefix))
             .unwrap_or(false)
 }
+
 pub fn normalize_scope(scope: &str) -> String {
     let trimmed = scope.trim().trim_matches('/');
     if trimmed.is_empty() {
@@ -32,6 +35,13 @@ pub fn normalize_scope(scope: &str) -> String {
         trimmed.to_string()
     }
 }
+
+pub fn raw_scope_contains_parent_traversal(scope: &str) -> bool {
+    Path::new(scope.trim())
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+}
+
 pub fn raw_scope_is_absolute(scope: &str) -> bool {
     let trimmed = scope.trim();
     Path::new(trimmed).is_absolute()
@@ -42,6 +52,7 @@ pub fn raw_scope_is_absolute(scope: &str) -> bool {
             .zip(trimmed.chars().nth(1))
             .is_some_and(|(first, second)| first.is_ascii_alphabetic() && second == ':')
 }
+
 pub fn wildcard_prefix(scope: &str) -> Option<String> {
     scope
         .find('*')
