@@ -3,6 +3,22 @@ pub fn load_run(run_id: &str) -> Result<CoordinationRun> {
         .with_context(|| format!("failed to read run {}", run_id))?;
     serde_json::from_str(&raw).with_context(|| format!("failed to parse run {}", run_id))
 }
+pub fn load_global_provider_cooldowns() -> Result<BTreeMap<String, ProviderCooldown>> {
+    let path = provider_cooldowns_path();
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to read {}", path.display()));
+        }
+    };
+    serde_json::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
+}
+pub fn write_global_provider_cooldowns(
+    cooldowns: &BTreeMap<String, ProviderCooldown>,
+) -> Result<()> {
+    write_json_atomic(&provider_cooldowns_path(), cooldowns)
+}
 pub fn load_task(run_id: &str, task_id: &str) -> Result<CoordinationTask> {
     let raw = fs::read_to_string(task_path(run_id, task_id))
         .with_context(|| format!("failed to read task {} for run {}", task_id, run_id))?;

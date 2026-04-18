@@ -352,6 +352,35 @@ pub fn execute_plan_code_review(task: &CoordinationTask) -> Result<TaskArtifact>
         },
     })
 }
+pub fn is_provider_backed(task: &CoordinationTask) -> bool {
+    if task.kind == CoordinationTaskKind::PlanCodeReview {
+        return false;
+    }
+    if task.kind == CoordinationTaskKind::MaterializeDesignDoc
+        && load_review_task_metadata(&task.run_id, &task.task_id).is_some()
+    {
+        return false;
+    }
+    matches!(
+        task.kind,
+        CoordinationTaskKind::DraftDesignDoc
+            | CoordinationTaskKind::ConvergeDesignDoc
+            | CoordinationTaskKind::MaterializeDesignDoc
+            | CoordinationTaskKind::PlanFlatTasks
+            | CoordinationTaskKind::RalphPlan
+            | CoordinationTaskKind::GeneratedReadTask
+            | CoordinationTaskKind::GeneratedWriteTask
+            | CoordinationTaskKind::ReviewArtifacts
+            | CoordinationTaskKind::ApplyApprovedEdits
+            | CoordinationTaskKind::RalphExecute
+            | CoordinationTaskKind::RalphVerify
+            | CoordinationTaskKind::PerfBaseline
+            | CoordinationTaskKind::PerfParse
+            | CoordinationTaskKind::PerfApply
+            | CoordinationTaskKind::PerfBench
+            | CoordinationTaskKind::PerfEvaluate
+    )
+}
 pub fn load_review_automated_checks(
     run_id: &str,
     dependencies: &[String],

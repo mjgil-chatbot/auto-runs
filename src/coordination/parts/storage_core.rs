@@ -2,6 +2,9 @@ use fs2::FileExt;
 pub fn coordination_root_dir() -> PathBuf {
     config::shared_infra_dir().join("coordination")
 }
+pub fn provider_cooldowns_path() -> PathBuf {
+    coordination_root_dir().join("provider_cooldowns.json")
+}
 pub fn run_dir(run_id: &str) -> PathBuf {
     coordination_root_dir().join(run_id)
 }
@@ -137,6 +140,14 @@ pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let json = serde_json::to_string_pretty(value)?;
     crate::storage::atomic::atomic_write(path, json.as_bytes())?;
     Ok(())
+}
+pub fn load_review_task_metadata(
+    run_id: &str,
+    task_id: &str,
+) -> Option<code_review::ReviewTaskMetadata> {
+    let path = review_metadata_path(run_id, task_id);
+    let raw = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
 }
 pub fn collect_workspace_entries(
     root: &Path,
