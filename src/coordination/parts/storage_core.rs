@@ -1,68 +1,91 @@
 use fs2::FileExt;
+
 pub fn coordination_root_dir() -> PathBuf {
     config::shared_infra_dir().join("coordination")
 }
+
 pub fn provider_cooldowns_path() -> PathBuf {
     coordination_root_dir().join("provider_cooldowns.json")
 }
+
 pub fn run_dir(run_id: &str) -> PathBuf {
     coordination_root_dir().join(run_id)
 }
+
 pub fn run_path(run_id: &str) -> PathBuf {
     run_dir(run_id).join("run.json")
 }
+
 pub fn tasks_dir(run_id: &str) -> PathBuf {
     run_dir(run_id).join("tasks")
 }
+
 pub fn task_path(run_id: &str, task_id: &str) -> PathBuf {
     tasks_dir(run_id).join(format!("{task_id}.json"))
 }
+
 pub fn claims_dir(run_id: &str) -> PathBuf {
     run_dir(run_id).join("claims")
 }
+
 pub fn claim_path(run_id: &str, task_id: &str) -> PathBuf {
     claims_dir(run_id).join(format!("{task_id}.json"))
 }
+
 pub fn claim_task_doc_snapshot_path(run_id: &str, task_id: &str) -> PathBuf {
     claims_dir(run_id).join(format!("{task_id}.task-doc-snapshot.md"))
 }
+
 pub fn mutation_batches_dir(run_id: &str) -> PathBuf {
     run_dir(run_id).join("mutations")
 }
+
 pub fn mutation_batch_path(run_id: &str, batch_id: &str) -> PathBuf {
     mutation_batches_dir(run_id).join(format!("{batch_id}.json"))
 }
+
 pub fn lightweight_broker_snapshot_path(run_id: &str) -> PathBuf {
     run_dir(run_id).join("lightweight_broker.json")
 }
+
 pub fn lightweight_source_tasks_path(run_id: &str) -> PathBuf {
     run_dir(run_id).join("lightweight_source_tasks.json")
 }
+
 pub fn lightweight_execution_tasks_path(run_id: &str) -> PathBuf {
     run_dir(run_id).join("lightweight_execution_tasks.json")
 }
+
 pub fn lightweight_passes_path(run_id: &str) -> PathBuf {
     run_dir(run_id).join("lightweight_passes.json")
 }
+
 pub fn events_path(run_id: &str) -> PathBuf {
     run_dir(run_id).join("events.jsonl")
 }
+
+// --- Council-specific paths ---
+
 /// Path to the council state file for a run.
 pub(crate) fn council_json_path(run_id: &str) -> PathBuf {
     run_dir(run_id).join("council.json")
 }
+
 /// Path to the append-only council ledger for a run.
 pub(crate) fn council_ledger_path(run_id: &str) -> PathBuf {
     run_dir(run_id).join("ledger.jsonl")
 }
+
 /// Path to the council mutation lock file for a run.
 pub(crate) fn council_lock_path(run_id: &str) -> PathBuf {
     run_dir(run_id).join("council.lock")
 }
+
 /// Alias used by the council submodule.
 pub(crate) fn ledger_path(run_id: &str) -> PathBuf {
     council_ledger_path(run_id)
 }
+
 /// Create the council-specific on-disk layout and write the initial CouncilRun state.
 pub fn seed_council_run(run: &CoordinationRun) -> Result<()> {
     let max_turns = run.council_max_turns.unwrap_or(40);
@@ -115,6 +138,7 @@ pub fn seed_council_run(run: &CoordinationRun) -> Result<()> {
 
     Ok(())
 }
+
 pub fn load_events(
     run_id: &str,
     limit: Option<usize>,
@@ -156,12 +180,15 @@ pub fn load_events(
 
     Ok(events)
 }
+
 pub fn presence_dir() -> PathBuf {
     coordination_root_dir().join("presence")
 }
+
 pub fn presence_path(instance_pid: u32) -> PathBuf {
     presence_dir().join(format!("{instance_pid}.json"))
 }
+
 pub fn create_claim_file(claim: &TaskClaim) -> Result<bool> {
     fs::create_dir_all(claims_dir(&claim.run_id))?;
     let path = claim_path(&claim.run_id, &claim.task_id);
@@ -187,6 +214,7 @@ pub fn create_claim_file(claim: &TaskClaim) -> Result<bool> {
         Err(err) => Err(err.into()),
     }
 }
+
 pub fn append_event(
     run_id: &str,
     event_type: &str,
@@ -195,6 +223,7 @@ pub fn append_event(
 ) -> Result<()> {
     append_event_with_provider(run_id, event_type, task_id, None, None, None, message)
 }
+
 pub fn append_event_with_provider(
     run_id: &str,
     event_type: &str,
@@ -238,6 +267,7 @@ pub fn append_event_with_provider(
     index_coordination_event(run_id, &event);
     Ok(())
 }
+
 pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let parent = path.parent().context("path missing parent")?;
     fs::create_dir_all(parent)?;
@@ -245,6 +275,7 @@ pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     crate::storage::atomic::atomic_write(path, json.as_bytes())?;
     Ok(())
 }
+
 pub fn begin_mutation_batch(
     run_id: &str,
     task_id: Option<&str>,
@@ -263,10 +294,12 @@ pub fn begin_mutation_batch(
     write_json_atomic(&mutation_batch_path(run_id, &batch.batch_id), &batch)?;
     Ok(batch)
 }
+
 pub fn complete_mutation_batch(batch: &mut CoordinationMutationBatch) -> Result<()> {
     batch.completed_at = Some(Utc::now());
     write_json_atomic(&mutation_batch_path(&batch.run_id, &batch.batch_id), batch)
 }
+
 pub fn write_review_task_metadata(
     run_id: &str,
     task_id: &str,
@@ -274,6 +307,7 @@ pub fn write_review_task_metadata(
 ) -> Result<()> {
     write_json_atomic(&review_metadata_path(run_id, task_id), metadata)
 }
+
 pub fn load_review_task_metadata(
     run_id: &str,
     task_id: &str,
@@ -282,6 +316,7 @@ pub fn load_review_task_metadata(
     let raw = fs::read_to_string(path).ok()?;
     serde_json::from_str(&raw).ok()
 }
+
 pub fn collect_workspace_entries(
     root: &Path,
     current: &Path,
@@ -322,12 +357,14 @@ pub fn collect_workspace_entries(
 
     Ok(())
 }
+
 pub fn should_skip_dir(relative: &Path) -> bool {
     matches!(
         relative.file_name().and_then(|name| name.to_str()),
         Some(".git" | "target" | "node_modules" | "dist")
     )
 }
+
 pub fn format_lines(lines: &[String]) -> String {
     if lines.is_empty() {
         "- <none>".to_string()
@@ -339,7 +376,19 @@ pub fn format_lines(lines: &[String]) -> String {
             .join("\n")
     }
 }
+
+// ── SQLite dual-write and query helpers ────────────────────────────────────
+//
+// All dual-write helpers are non-fatal: file writes are authoritative, SQLite
+// updates are opportunistic.  Connection management and schema initialisation
+// are delegated to the shared StorageIndex so that a freshly-created or rebuilt
+// index.db always has valid tables before any INSERT.
+
 use crate::storage::index::StorageIndex;
+
+// Query/record types for coordination-specific SQLite queries.
+// These are not part of chatbot_lib's StorageIndex — they are local to auto-runs.
+
 #[derive(Default)]
 pub struct RunQuery {
     pub run_id: Option<String>,
@@ -350,6 +399,7 @@ pub struct RunQuery {
     pub created_before: Option<DateTime<Utc>>,
     pub limit: Option<usize>,
 }
+
 pub struct RunRecord {
     pub run_id: String,
     pub provider: Option<String>,
@@ -359,6 +409,7 @@ pub struct RunRecord {
     pub created_at: String,
     pub updated_at: String,
 }
+
 #[derive(Default)]
 pub struct CoordinationEventQuery {
     pub run_id: Option<String>,
@@ -368,6 +419,7 @@ pub struct CoordinationEventQuery {
     pub at_before: Option<DateTime<Utc>>,
     pub limit: Option<usize>,
 }
+
 pub struct CoordinationEventRecord {
     pub id: i64,
     pub run_id: String,
@@ -379,6 +431,7 @@ pub struct CoordinationEventRecord {
     pub message: Option<String>,
     pub at: String,
 }
+
 pub fn list_runs_from_index(idx: &StorageIndex, query: &RunQuery) -> Result<Vec<RunRecord>> {
     let conn = idx.connection();
     let mut sql = String::from(
@@ -428,6 +481,7 @@ pub fn list_runs_from_index(idx: &StorageIndex, query: &RunQuery) -> Result<Vec<
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(anyhow::Error::from)
 }
+
 pub fn list_events_from_index(
     idx: &StorageIndex,
     query: &CoordinationEventQuery,
@@ -478,6 +532,7 @@ pub fn list_events_from_index(
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(anyhow::Error::from)
 }
+
 /// Obtain a shared StorageIndex, returning None when the database is
 /// unavailable (e.g. first launch before any directory exists).  Because
 /// `StorageIndex::open()` calls `open_index()` → `ensure_schema()`, the
@@ -485,6 +540,52 @@ pub fn list_events_from_index(
 pub fn get_storage_index() -> Option<StorageIndex> {
     StorageIndex::open().ok()
 }
+
+/// Upsert a coordination run into the SQLite index.
+/// Non-fatal: logs warning on failure but does not propagate errors.
+pub fn index_run(run: &CoordinationRun) {
+    let Some(idx) = get_storage_index() else {
+        return;
+    };
+    let conn = idx.connection();
+    let completed_at: Option<String> = if matches!(
+        run.status,
+        CoordinationRunStatus::Completed
+            | CoordinationRunStatus::Failed
+            | CoordinationRunStatus::Canceled
+    ) {
+        Some(run.updated_at.to_rfc3339())
+    } else {
+        None
+    };
+    let workflow_mode = run.workflow_mode.as_str().to_string();
+
+    if let Err(err) = conn.execute(
+        r#"
+        INSERT INTO runs (run_id, root_chat_id, workspace_path, provider, goal, status, workflow_mode, created_at, updated_at, completed_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        ON CONFLICT(run_id) DO UPDATE SET
+            status       = excluded.status,
+            updated_at   = excluded.updated_at,
+            completed_at = excluded.completed_at
+        "#,
+        rusqlite::params![
+            run.run_id,
+            run.root_chat_id,
+            run.workspace_path,
+            run.provider,
+            run.goal,
+            run.status.as_str(),
+            workflow_mode,
+            run.created_at.to_rfc3339(),
+            run.updated_at.to_rfc3339(),
+            completed_at,
+        ],
+    ) {
+        debug!("index_run failed for {}: {}", run.run_id, err);
+    }
+}
+
 /// Upsert a coordination task into the SQLite index.
 /// Preserves provider, category, and fallback_from attribution.
 pub fn index_task(task: &CoordinationTask) {
@@ -541,6 +642,7 @@ pub fn index_task(task: &CoordinationTask) {
         debug!("index_task failed for {}/{}: {}", task.run_id, task.task_id, err);
     }
 }
+
 /// Index a coordination event into SQLite.
 pub fn index_coordination_event(run_id: &str, event: &CoordinationEvent) {
     let Some(idx) = get_storage_index() else {
@@ -571,6 +673,69 @@ pub fn index_coordination_event(run_id: &str, event: &CoordinationEvent) {
         debug!("index_coordination_event failed for {}: {}", run_id, err);
     }
 }
+
+/// Look up the cost tier string for a given provider_id from the provider registry.
+pub fn provider_cost_tier_for(provider_id: &str) -> Option<String> {
+    let profiles = config::load_provider_profiles();
+    profiles
+        .get(provider_id)
+        .map(|p| config_cost_tier_name(p.cost_tier.clone()))
+}
+
+pub fn config_cost_tier_name(cost_tier: config::CostTier) -> String {
+    match cost_tier {
+        config::CostTier::Low => "low",
+        config::CostTier::Medium => "medium",
+        config::CostTier::High => "high",
+        config::CostTier::Premium => "premium",
+    }
+    .to_string()
+}
+
+/// Record provider usage for a completed or failed task.
+/// Captures provider, category, cost_tier, and outcome for full attribution.
+pub fn index_provider_usage(
+    run_id: &str,
+    task_id: &str,
+    provider_id: &str,
+    category: Option<&TaskCategory>,
+    outcome: &CoordinationTaskOutcome,
+    started_at: Option<&DateTime<Utc>>,
+    finished_at: &DateTime<Utc>,
+    cost_tier: Option<&str>,
+) {
+    let Some(idx) = get_storage_index() else {
+        return;
+    };
+    let conn = idx.connection();
+    let category_str = category
+        .and_then(|c| serde_json::to_value(c).ok())
+        .and_then(|v| v.as_str().map(str::to_string));
+    if let Err(err) = conn.execute(
+        r#"
+        INSERT INTO provider_usage (run_id, task_id, provider_id, cost_tier, category, outcome, started_at, finished_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        "#,
+        rusqlite::params![
+            run_id,
+            task_id,
+            provider_id,
+            cost_tier,
+            category_str,
+            outcome.as_str(),
+            started_at.map(|dt| dt.to_rfc3339()),
+            finished_at.to_rfc3339(),
+        ],
+    ) {
+        debug!("index_provider_usage failed for {}/{}: {}", run_id, task_id, err);
+    }
+}
+
+// ── Coordination query APIs ────────────────────────────────────────────────
+//
+// These delegate to the shared StorageIndex query helpers, converting results
+// to the legacy types still used within the coordination module.
+
 /// A run summary row returned by coordination queries.
 #[derive(Debug, Clone)]
 pub struct RunSummaryRow {
@@ -582,6 +747,7 @@ pub struct RunSummaryRow {
     pub created_at: String,
     pub updated_at: String,
 }
+
 impl From<RunRecord> for RunSummaryRow {
     fn from(r: RunRecord) -> Self {
         Self {
@@ -595,6 +761,21 @@ impl From<RunRecord> for RunSummaryRow {
         }
     }
 }
+
+impl From<&CoordinationRun> for RunSummaryRow {
+    fn from(run: &CoordinationRun) -> Self {
+        Self {
+            run_id: run.run_id.clone(),
+            provider: run.provider.clone(),
+            goal: run.goal.clone(),
+            status: run.status.as_str().to_string(),
+            workflow_mode: Some(run.workflow_mode.as_str().to_string()),
+            created_at: run.created_at.to_rfc3339(),
+            updated_at: run.updated_at.to_rfc3339(),
+        }
+    }
+}
+
 /// An event row returned by coordination queries.
 #[derive(Debug, Clone)]
 pub struct EventRow {
@@ -608,6 +789,7 @@ pub struct EventRow {
     pub message: Option<String>,
     pub at: String,
 }
+
 impl From<CoordinationEventRecord> for EventRow {
     fn from(r: CoordinationEventRecord) -> Self {
         Self {

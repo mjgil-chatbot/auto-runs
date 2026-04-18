@@ -50,6 +50,9 @@ pub use provider_execution::*;
 #[path = "parts/provider_execution_helpers.rs"]
 pub mod provider_execution_helpers;
 pub use provider_execution_helpers::*;
+#[path = "parts/provider_contracts.rs"]
+pub mod provider_contracts;
+pub use provider_contracts::*;
 #[path = "parts/artifacts.rs"]
 pub mod artifacts;
 pub use artifacts::*;

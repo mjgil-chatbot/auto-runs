@@ -124,3 +124,130 @@ fn append_reask_event(
         &event.message,
     )
 }
+pub fn build_provider_query(task: &CoordinationTask) -> Result<String> {
+    let response_contract = provider_response_contract(task);
+    let dependency_artifacts = load_dependency_artifacts_for_task(task)?;
+    if dependency_artifacts.is_empty() && response_contract.is_empty() {
+        return Ok(task.prompt.clone());
+    }
+
+    let mut sections = vec![task.prompt.clone()];
+    if !dependency_artifacts.is_empty() {
+        sections.push(format!(
+            "Dependency artifacts:\n{}",
+            dependency_artifacts.join("\n\n---\n\n")
+        ));
+    }
+    if !response_contract.is_empty() {
+        sections.push(response_contract);
+    }
+    Ok(sections.join("\n\n"))
+}
+pub use super::provider_contracts::{
+    provider_response_contract, provider_visible_workspace_root, task_report_validator_hint,
+};
+#[cfg(test)]
+#[test]
+fn task_for_provider_execution_rewrites_cwd_into_shared_runsc_workspace() {
+    let now = Utc::now();
+    let run = CoordinationRun {
+        run_id: "runsc-run".to_string(),
+        root_chat_id: "chat".to_string(),
+        workspace_path: "/tmp/host-workspace".to_string(),
+        execution_environment: AutonomousExecutionEnvironment::Runsc,
+        runsc_workspace_includes: Vec::new(),
+        provider: "codex".to_string(),
+        goal: "goal".to_string(),
+        workflow_mode: AutonomousWorkflowMode::PerfHillClimber,
+        design_doc_path: "docs/autonomous/design.md".to_string(),
+        completion_criteria: String::new(),
+        max_iterations: 1,
+        status: CoordinationRunStatus::Active,
+        created_at: now,
+        updated_at: now,
+        created_by_instance: None,
+        max_agents: 1,
+        allow_write_tasks: true,
+        require_review_before_apply: false,
+        auto_retry_failed_tasks: true,
+        notes: String::new(),
+        review_scope: None,
+        review_dimensions: None,
+        review_fix_mode: None,
+        council_turn_policy: None,
+        council_max_turns: None,
+        provider_cooldowns: BTreeMap::new(),
+        task_ids: Vec::new(),
+        processed_mutation_batch_ids: BTreeSet::new(),
+    };
+    let task = CoordinationTask {
+        task_id: "task".to_string(),
+        run_id: run.run_id.clone(),
+        title: "Test".to_string(),
+        prompt: "prompt".to_string(),
+        cwd: run.workspace_path.clone(),
+        status: CoordinationTaskStatus::Queued,
+        created_at: now,
+        updated_at: now,
+        ..CoordinationTask::default()
+    };
+
+    let adjusted = task_for_provider_execution(&task, &run);
+
+    assert_eq!(
+        adjusted.cwd,
+        autonomous_runsc_workspace_root(&run.run_id)
+            .to_string_lossy()
+            .into_owned()
+    );
+}
+#[cfg(test)]
+#[test]
+fn task_for_provider_execution_keeps_host_cwd_unchanged() {
+    let now = Utc::now();
+    let run = CoordinationRun {
+        run_id: "host-run".to_string(),
+        root_chat_id: "chat".to_string(),
+        workspace_path: "/tmp/host-workspace".to_string(),
+        execution_environment: AutonomousExecutionEnvironment::Host,
+        runsc_workspace_includes: Vec::new(),
+        provider: "codex".to_string(),
+        goal: "goal".to_string(),
+        workflow_mode: AutonomousWorkflowMode::PerfHillClimber,
+        design_doc_path: "docs/autonomous/design.md".to_string(),
+        completion_criteria: String::new(),
+        max_iterations: 1,
+        status: CoordinationRunStatus::Active,
+        created_at: now,
+        updated_at: now,
+        created_by_instance: None,
+        max_agents: 1,
+        allow_write_tasks: true,
+        require_review_before_apply: false,
+        auto_retry_failed_tasks: true,
+        notes: String::new(),
+        review_scope: None,
+        review_dimensions: None,
+        review_fix_mode: None,
+        council_turn_policy: None,
+        council_max_turns: None,
+        provider_cooldowns: BTreeMap::new(),
+        task_ids: Vec::new(),
+        processed_mutation_batch_ids: BTreeSet::new(),
+    };
+    let task = CoordinationTask {
+        task_id: "task".to_string(),
+        run_id: run.run_id.clone(),
+        title: "Test".to_string(),
+        prompt: "prompt".to_string(),
+        cwd: run.workspace_path.clone(),
+        status: CoordinationTaskStatus::Queued,
+        created_at: now,
+        updated_at: now,
+        ..CoordinationTask::default()
+    };
+
+    let adjusted = task_for_provider_execution(&task, &run);
+
+    assert_eq!(adjusted.cwd, task.cwd);
+}

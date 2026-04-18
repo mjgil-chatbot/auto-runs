@@ -230,7 +230,32 @@ pub enum PromptFamily {
     Mechanics,
     Principles,
 }
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CostTier {
+    #[default]
+    Low,
+    Medium,
+    High,
+    Premium,
+}
 pub use auto_runs_contracts::AgentRole;
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelClass {
+    #[default]
+    Frontier,
+    Standard,
+    Fast,
+}
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolAccess {
+    ReadOnly,
+    Analysis,
+    #[default]
+    Execution,
+}
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct TaskExecutionReport {
     #[serde(default)]

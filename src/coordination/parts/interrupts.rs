@@ -257,6 +257,88 @@ pub fn create_council_user_reply_interrupt(
     create_interrupt(&interrupt)?;
     Ok(interrupt)
 }
+fn apply_review_approval_resolution(
+    run_id: &str,
+    review_task_id: Option<&str>,
+    resolution: &InterruptResolution,
+) -> Result<()> {
+    match resolution {
+        InterruptResolution::Approved { .. } | InterruptResolution::EditedPayload { .. } => Ok(()),
+        InterruptResolution::Rejected { note } => fail_apply_tasks_for_review_resolution(
+            run_id,
+            review_task_id,
+            "Review approval rejected",
+            note,
+        ),
+        InterruptResolution::Deferred { note } => fail_apply_tasks_for_review_resolution(
+            run_id,
+            review_task_id,
+            "Review approval deferred",
+            note,
+        ),
+    }
+}
+fn fail_apply_tasks_for_review_resolution(
+    run_id: &str,
+    review_task_id: Option<&str>,
+    reason_prefix: &str,
+    note: &str,
+) -> Result<()> {
+    let mut changed_any = false;
+    let now = Utc::now();
+    let reason = if note.trim().is_empty() {
+        reason_prefix.to_string()
+    } else {
+        format!("{reason_prefix}: {}", note.trim())
+    };
+    let mut tasks = load_tasks(run_id)?;
+    for task in tasks.iter_mut() {
+        if task.kind != CoordinationTaskKind::ApplyApprovedEdits {
+            continue;
+        }
+        if matches!(
+            task.status,
+            CoordinationTaskStatus::Completed
+                | CoordinationTaskStatus::Failed
+                | CoordinationTaskStatus::Canceled
+        ) {
+            continue;
+        }
+        if let Some(review_task_id) = review_task_id {
+            if !task
+                .dependencies
+                .iter()
+                .any(|dependency| dependency == review_task_id)
+            {
+                continue;
+            }
+        }
+        task.status = CoordinationTaskStatus::Failed;
+        task.claimed_by = None;
+        task.artifact_summary = Some(reason.clone());
+        task.updated_at = now;
+        write_json_atomic(&task_path(run_id, &task.task_id), task)?;
+        index_task(task);
+        let _ = fs::remove_file(claim_path(run_id, &task.task_id));
+        append_event(
+            run_id,
+            "task_failed",
+            Some(&task.task_id),
+            &format!(
+                "Marked {} failed after policy resolution. {}",
+                task.title, reason
+            ),
+        )?;
+        changed_any = true;
+    }
+    if changed_any {
+        let mut run = load_run(run_id)?;
+        run.updated_at = now;
+        write_json_atomic(&run_path(run_id), &run)?;
+        index_run(&run);
+    }
+    Ok(())
+}
 fn council_user_reply_text(resolution: &InterruptResolution) -> String {
     match resolution {
         InterruptResolution::Approved { note } => {

@@ -63,3 +63,72 @@ fn perf_task_kind_slug(kind: CoordinationTaskKind) -> &'static str {
         _ => "perf",
     }
 }
+fn persist_completed_perf_task(
+    run_id: &str,
+    task: &mut CoordinationTask,
+    claimed_by: Option<u32>,
+    provider_name: &str,
+    report: TaskExecutionReport,
+    body: String,
+) -> Result<()> {
+    let summary = if report.summary.trim().is_empty() {
+        task.title.clone()
+    } else {
+        report.summary.trim().to_string()
+    };
+    let artifact = TaskArtifact {
+        run_id: run_id.to_string(),
+        task_id: task.task_id.clone(),
+        provider: task
+            .assigned_provider
+            .clone()
+            .or_else(|| Some(provider_name.to_string())),
+        task_category: task.task_category,
+        fallback_from: task.provider_hint.clone(),
+        summary: summary.clone(),
+        body,
+        completed_at: Utc::now(),
+        report: report.clone(),
+    };
+
+    task.status = CoordinationTaskStatus::Completed;
+    task.claimed_by = claimed_by;
+    task.artifact_summary = Some(format!("{} [{}]", summary, report.outcome.as_str()));
+    task.updated_at = Utc::now();
+
+    fs::create_dir_all(artifact_dir(run_id, &task.task_id))?;
+    write_json_atomic(&artifact_result_path(run_id, &task.task_id), &artifact)?;
+    fs::write(artifact_notes_path(run_id, &task.task_id), &artifact.body)?;
+    let _ = fs::remove_file(artifact_materialized_files_path(run_id, &task.task_id));
+    write_json_atomic(&task_path(run_id, &task.task_id), task)?;
+    index_task(task);
+    if claimed_by.is_some() {
+        let _ = fs::remove_file(claim_path(run_id, &task.task_id));
+    }
+    append_event_with_provider(
+        run_id,
+        "task_completed",
+        Some(&task.task_id),
+        task.assigned_provider.as_deref().or(Some(provider_name)),
+        task.task_category,
+        task.provider_hint.as_deref(),
+        &format!(
+            "Completed: {} [{}]. {}",
+            task.title,
+            report.outcome.as_str(),
+            summary
+        ),
+    )?;
+    index_provider_usage(
+        run_id,
+        &task.task_id,
+        task.assigned_provider.as_deref().unwrap_or(provider_name),
+        task.task_category.as_ref(),
+        &report.outcome,
+        Some(&task.created_at),
+        &task.updated_at,
+        provider_cost_tier_for(task.assigned_provider.as_deref().unwrap_or(provider_name))
+            .as_deref(),
+    );
+    Ok(())
+}

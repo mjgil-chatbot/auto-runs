@@ -1,3 +1,28 @@
+pub fn ensure_workspace_provider_capability_registry(run: &CoordinationRun) -> Result<()> {
+    if run.workflow_mode != AutonomousWorkflowMode::DesignConsensus {
+        return Ok(());
+    }
+
+    let target_path = Path::new(&run.workspace_path).join("workflow-registry/providers.json");
+    const EMBEDDED_PROVIDER_CAPABILITY_REGISTRY_JSON: &str =
+        include_str!("../../../workflow-registry/providers.json");
+    let registry_contents = fs::read_to_string(PROVIDER_CAPABILITY_REGISTRY_PATH)
+        .unwrap_or_else(|_| EMBEDDED_PROVIDER_CAPABILITY_REGISTRY_JSON.to_string());
+    if fs::read_to_string(&target_path)
+        .map(|existing| existing == registry_contents)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    let parent = target_path
+        .parent()
+        .context("provider capability registry path missing parent")?;
+    fs::create_dir_all(parent)?;
+    fs::write(&target_path, registry_contents)
+        .with_context(|| format!("failed to write {}", target_path.display()))?;
+    Ok(())
+}
 pub(crate) fn persist_selected_tasks(
     run_id: &str,
     tasks: &[CoordinationTask],

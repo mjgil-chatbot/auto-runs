@@ -370,6 +370,25 @@ fn gh_auth_status_active_unsupported(stderr: &str) -> bool {
     let trimmed = stderr.trim().to_ascii_lowercase();
     trimmed.contains("unknown flag: --active") || trimmed.contains("unknown flag `active`")
 }
+pub fn check_dialog_rail(task: &CoordinationTask, query: &str) -> RailDecision {
+    let mut additions = Vec::new();
+    let response_contract = provider_response_contract(task);
+    if !response_contract.is_empty() && !query.contains(&response_contract) {
+        additions.push(response_contract);
+    }
+    if let Some(reminder) = declared_write_scope_reminder(task) {
+        if !query.contains("You may modify files only inside this declared write scope:") {
+            additions.push(reminder);
+        }
+    }
+    if additions.is_empty() {
+        RailDecision::Allow
+    } else {
+        RailDecision::Rewrite {
+            replacement: format!("{query}\n\n{}", additions.join("\n\n")),
+        }
+    }
+}
 pub fn check_execution_rail(
     run: &CoordinationRun,
     task: &CoordinationTask,
