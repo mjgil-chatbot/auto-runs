@@ -613,6 +613,23 @@ pub fn format_attempt_suffix(task: &CoordinationTask) -> String {
         format!(" (attempt {}/{})", task.attempt_count, task.max_attempts)
     }
 }
+/// Optional auto-prune hook that respects the `auto_prune_age_days` config.
+///
+/// When `coordination.auto_prune_age_days` is set to `Some(N)`, coordination
+/// runs older than N days are deleted from both the SQLite index and the
+/// authoritative file system.  When the config value is `None` (the default),
+/// this function is a no-op and returns `Ok(0)` without touching anything.
+///
+/// This function is safe to call at app startup or after long-running
+/// operations.  It does **not** change ordinary coordination run behavior
+/// when auto-prune is disabled.
+pub fn maybe_auto_prune() -> anyhow::Result<u32> {
+    let Some(age_days) = crate::config::auto_prune_age_days() else {
+        // Auto-prune is disabled — do nothing (default-off behavior).
+        return Ok(0);
+    };
+    prune_old_coordination_runs(age_days)
+}
 fn note_setting_value<'a>(notes: &'a str, key: &str) -> Option<&'a str> {
     notes.lines().find_map(|line| {
         let trimmed = line.trim();
