@@ -2,6 +2,20 @@ use super::*;
 #[allow(unused_imports)]
 use crate::config;
 #[allow(unused_imports)]
+use crate::data::ChatSession;
+#[allow(unused_imports)]
+use crate::memory;
+#[allow(unused_imports)]
+use crate::model::ModelProvider;
+#[allow(unused_imports)]
+use crate::provider_bridge::{
+    autonomous_provider_overrides, call_provider_cli_stream_with_overrides,
+};
+#[allow(unused_imports)]
+use crate::{
+    AutonomousExecutionEnvironment, AutonomousWorkflowMode, ReviewFixMode, ReviewScope, TurnPolicy,
+};
+#[allow(unused_imports)]
 use anyhow::{Context, Result};
 #[allow(unused_imports)]
 use chrono::{DateTime, Utc};
@@ -30,5 +44,7 @@ use std::thread;
 use std::time::Duration;
 #[allow(unused_imports)]
 use uuid::Uuid;
+
 include!("storage_core.rs");
 include!("storage_artifacts.rs");
+include!("storage_query.rs");
