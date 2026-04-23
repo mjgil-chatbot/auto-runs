@@ -318,6 +318,87 @@ impl AutoRunsApp {
             Err(err) => self.append_error(format!("failed to query runs: {err}")),
         }
     }}
+impl AutoRunsApp {
+    fn select_run(&mut self, run_id: String, is_shift_click: bool) {
+        if is_shift_click {
+            if self.selection_anchor_run_id.is_none() {
+                self.selection_anchor_run_id = Some(run_id.clone());
+            }
+            if let Some(anchor) = &self.selection_anchor_run_id.clone() {
+                let anchor_idx = self.runs.iter().position(|r| &r.run_id == anchor);
+                let clicked_idx = self.runs.iter().position(|r| r.run_id == run_id);
+                if let (Some(a), Some(c)) = (anchor_idx, clicked_idx) {
+                    let (start, end) = if a < c { (a, c) } else { (c, a) };
+                    for run in &self.runs[start..=end] {
+                        self.selected_run_ids.insert(run.run_id.clone());
+                    }
+                }
+                self.selected_run_ids.insert(run_id.clone());
+                self.selection_anchor_run_id = Some(run_id.clone());
+                self.selected_run_id = Some(run_id);
+            } else {
+                self.selected_run_ids.insert(run_id.clone());
+                self.selection_anchor_run_id = Some(run_id.clone());
+                self.selected_run_id = Some(run_id);
+            }
+        } else {
+            self.selected_run_ids.clear();
+            self.selected_run_ids.insert(run_id.clone());
+            self.selection_anchor_run_id = Some(run_id.clone());
+            self.selected_run_id = Some(run_id);
+        }
+
+        self.populate_form_on_next_snapshot = true;
+        self.snapshot = None;
+        self.events.clear();
+        self.selected_run_load_error = None;
+        self.request_selected_run_load();
+    }}
+impl AutoRunsApp {
+    fn request_selected_run_load(&mut self) {
+        let Some(run_id) = self.selected_run_id.clone() else {
+            return;
+        };
+        if self.selected_run_load_in_flight.as_deref() == Some(run_id.as_str()) {
+            return;
+        }
+        if self.selected_run_load_in_flight.is_some() {
+            self.selected_run_load_pending = true;
+            return;
+        }
+        let Some(tx) = &self.cmd_tx else {
+            return;
+        };
+        let tx = tx.clone();
+        debug!("UI thread: sending LoadSelectedRun for {run_id}");
+        if let Err(err) = tx.try_send(UiThreadCmd::LoadSelectedRun(run_id)) {
+            self.selected_run_load_pending = true;
+            debug!(error = %err, "UI thread: failed to queue LoadSelectedRun command");
+            return;
+        }
+        self.selected_run_load_in_flight = self.selected_run_id.clone();
+    }}
+impl AutoRunsApp {
+    fn request_runs_refresh(&mut self) {
+        if self.refresh_runs_in_flight {
+            return;
+        }
+        let Some(tx) = &self.cmd_tx else {
+            return;
+        };
+        let tx = tx.clone();
+        debug!("UI thread: sending RefreshRuns command");
+        if let Err(err) = tx.try_send(UiThreadCmd::RefreshRuns) {
+            debug!(error = %err, "UI thread: failed to queue RefreshRuns command");
+            return;
+        }
+        self.refresh_runs_in_flight = true;
+    }}
+impl AutoRunsApp {
+    fn selected_run_summary(&self) -> Option<&RunSummaryRow> {
+        let selected_run_id = self.selected_run_id.as_deref()?;
+        self.runs.iter().find(|run| run.run_id == selected_run_id)
+    }}
 fn launch_background_driver_process() -> anyhow::Result<()> {
     let current_exe = std::env::current_exe()
         .map_err(|err| anyhow::anyhow!("failed to resolve current executable: {err}"))?;
@@ -364,5 +445,12 @@ fn notes_with_setting(notes: &str, key: &str, value: &str) -> String {
     } else {
         format!("{existing}\n{prefix}{value}")
     }
+}
+fn run_completion_criteria_input(app: &AutoRunsApp) -> Option<String> {
+    let criteria = app.completion_criteria.trim();
+    if criteria.is_empty() {
+        return None;
+    }
+    Some(criteria.to_string())
 }
 fn main() {}
