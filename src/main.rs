@@ -6,6 +6,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc as tokio_mpsc;
 mod restart_dialog;
+mod run_form;
 use auto_runs::coordination;
 use auto_runs::coordination::CoordinationEvent;
 use auto_runs::coordination::CoordinationRunSnapshot;
