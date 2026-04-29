@@ -21,6 +21,7 @@ pub use chatbot_lib::workspace;
 pub mod coordination;
 pub mod driver;
 pub mod process_limits;
+pub mod sync;
 #[cfg(test)]
 mod cap_tests {
     use cap::Cap;
