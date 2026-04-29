@@ -400,6 +400,36 @@ impl AutoRunsApp {
         let selected_run_id = self.selected_run_id.as_deref()?;
         self.runs.iter().find(|run| run.run_id == selected_run_id)
     }}
+impl AutoRunsApp {
+    fn render_runs_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Runs");
+        ui.horizontal(|ui| {
+            if ui.button("Refresh").clicked() {
+                if let Some(tx) = &self.cmd_tx {
+                    let tx = tx.clone();
+                    let _ = tx.try_send(UiThreadCmd::RefreshRuns);
+                }
+            }
+        });
+        let mut pending_select: Option<String> = None;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for run in &self.runs {
+                    let prefix = self
+                        .run_sidebar_prefixes
+                        .get(&run.run_id)
+                        .map(String::as_str);
+                    let selected = self.selected_run_ids.contains(&run.run_id);
+                    if run_form::render_run_sidebar_entry(ui, run, prefix, selected).clicked() {
+                        pending_select = Some(run.run_id.clone());
+                    }
+                }
+            });
+        if let Some(run_id) = pending_select {
+            self.select_run(run_id, false);
+        }
+    }}
 fn launch_background_driver_process() -> anyhow::Result<()> {
     let current_exe = std::env::current_exe()
         .map_err(|err| anyhow::anyhow!("failed to resolve current executable: {err}"))?;
