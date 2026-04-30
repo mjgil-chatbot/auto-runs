@@ -268,6 +268,60 @@ fn terminate_spawned_worker_process(child: &mut std::process::Child) {
     }
     let _ = child.kill();
 }
+fn spawned_worker_stall_detail(
+    run_id: &str,
+    task_id: &str,
+    worker_pid: u32,
+    now: DateTime<Utc>,
+) -> Option<String> {
+    let claim = load_claim(run_id, task_id).ok()?;
+    if claim.instance_pid != worker_pid {
+        return None;
+    }
+    if claim.lifecycle_phase != ClaimLifecyclePhase::TaskExecutionStarted {
+        return None;
+    }
+
+    let stale_after = claim_heartbeat_stale_at(&claim);
+    if stale_after > now {
+        return None;
+    }
+
+    let stalled_for = now
+        .signed_duration_since(claim.last_heartbeat_at)
+        .num_seconds()
+        .max(0);
+    Some(format!(
+        "Worker PID {worker_pid} missed the 5-minute heartbeat deadline after {stalled_for} seconds without a heartbeat. Claim progress: {}.",
+        claim_lifecycle_summary(&claim)
+    ))
+}
+fn spawned_worker_adoption_stall_detail(
+    run_id: &str,
+    task_id: &str,
+    launcher_pid: u32,
+    worker_pid: u32,
+    now: DateTime<Utc>,
+) -> Option<String> {
+    let claim = load_claim(run_id, task_id).ok()?;
+    if claim.instance_pid != launcher_pid || claim.worker_pid != Some(worker_pid) {
+        return None;
+    }
+    if claim.lifecycle_phase != ClaimLifecyclePhase::WorkerSpawned {
+        return None;
+    }
+
+    let spawned_at = claim.worker_spawned_at.unwrap_or(claim.claimed_at);
+    let stale_after = spawned_at + chrono::Duration::seconds(TASK_HEARTBEAT_STALE_SECS);
+    if stale_after > now {
+        return None;
+    }
+
+    Some(format!(
+        "Worker PID {worker_pid} did not adopt the launcher-owned claim within the 5-minute startup window. Claim progress: {}.",
+        claim_lifecycle_summary(&claim)
+    ))
+}
 fn spawned_worker_timeout_detail(
     task: &CoordinationTask,
     started_at: std::time::Instant,

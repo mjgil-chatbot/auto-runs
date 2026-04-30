@@ -575,3 +575,35 @@ pub fn resolve_scope_to_cwd(cwd: &Path, scope: &str) -> String {
     // Fallback: return normalized scope
     normalize_scope(trimmed)
 }
+pub fn execute_builtin_task(task: &CoordinationTask) -> Result<TaskArtifact> {
+    match task.kind {
+        CoordinationTaskKind::SurveyWorkspace => execute_survey_workspace(task),
+        CoordinationTaskKind::PlanCodeReview => execute_plan_code_review(task),
+        CoordinationTaskKind::MaterializeDesignDoc
+            if load_review_task_metadata(&task.run_id, &task.task_id).is_some() =>
+        {
+            execute_code_review_materialization(task)
+        }
+        CoordinationTaskKind::DraftDesignDoc
+        | CoordinationTaskKind::ConvergeDesignDoc
+        | CoordinationTaskKind::MaterializeDesignDoc
+        | CoordinationTaskKind::PlanFlatTasks
+        | CoordinationTaskKind::RalphPlan
+        | CoordinationTaskKind::GeneratedReadTask
+        | CoordinationTaskKind::GeneratedWriteTask
+        | CoordinationTaskKind::ReviewArtifacts
+        | CoordinationTaskKind::ApplyApprovedEdits
+        | CoordinationTaskKind::RalphExecute
+        | CoordinationTaskKind::RalphVerify
+        | CoordinationTaskKind::PerfBaseline
+        | CoordinationTaskKind::PerfParse
+        | CoordinationTaskKind::PerfApply
+        | CoordinationTaskKind::PerfBench
+        | CoordinationTaskKind::PerfEvaluate => {
+            anyhow::bail!(
+                "provider-backed task {:?} reached builtin executor",
+                task.kind
+            )
+        }
+    }
+}

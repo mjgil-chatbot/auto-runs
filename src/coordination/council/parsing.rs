@@ -137,6 +137,65 @@ fn validate_work_report(
 pub(super) fn contains_stub_markers(root: &Path, changed_file: &str) -> Result<bool> {
     crate::coordination::file_contains_stub_markers(root, changed_file)
 }
+pub(super) fn verify_completion(run_id: &str, council: &CouncilRun) -> Result<Vec<String>> {
+    let mut issues = Vec::new();
+
+    // Active claims are a hard blocker — claims must be released before completion.
+    // This is the most common failure mode and the one most fixable by the models.
+    if !council.active_claims.is_empty() {
+        issues.push(format!(
+            "{} scope(s) are still claimed and must be released before completing",
+            council.active_claims.len()
+        ));
+    }
+    // At least one validated work report must exist — no work means goal cannot be met.
+    if council.total_work_reports == 0 {
+        issues.push("no validated work reports were recorded".to_string());
+    }
+    // Empty completion criteria is informational — the concrete checks above
+    // (active claims, work reports, artifact outcomes) are the authoritative
+    // blockers. Don't push an issue here; a run with real work and no remaining
+    // claims satisfies the intent even when criteria was left blank.
+
+    let artifacts_root = coordination::artifacts_dir(run_id);
+    if artifacts_root.is_dir() {
+        let entries = fs::read_dir(&artifacts_root)
+            .with_context(|| format!("failed to read {}", artifacts_root.display()))?;
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let result_path = entry.path().join("result.json");
+            if !result_path.is_file() {
+                continue;
+            }
+            let raw = fs::read_to_string(&result_path)
+                .with_context(|| format!("failed to read {}", result_path.display()))?;
+            let artifact: coordination::TaskArtifact = serde_json::from_str(&raw)
+                .with_context(|| format!("failed to parse {}", result_path.display()))?;
+            if !artifact.report.validation_errors.is_empty() {
+                issues.push(format!(
+                    "artifact {} still has validation errors",
+                    artifact.task_id
+                ));
+            }
+            if matches!(
+                artifact.report.outcome,
+                coordination::CoordinationTaskOutcome::Blocked
+                    | coordination::CoordinationTaskOutcome::Partial
+                    | coordination::CoordinationTaskOutcome::Failed
+            ) {
+                issues.push(format!(
+                    "artifact {} ended with outcome {}",
+                    artifact.task_id,
+                    artifact.report.outcome.as_str()
+                ));
+            }
+        }
+    }
+
+    Ok(issues)
+}
 fn store_work_artifact(
     run_id: &str,
     council: &CouncilRun,

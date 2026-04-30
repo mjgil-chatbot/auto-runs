@@ -77,3 +77,128 @@ fn should_defer_missing_claim_repair(task: &CoordinationTask) -> bool {
     };
     process_is_alive_for_claim_repair(owner_pid)
 }
+pub(crate) fn reconcile_missing_claim_for_active_task_from_snapshot(
+    run_id: &str,
+    task: &CoordinationTask,
+    now: DateTime<Utc>,
+) -> Result<bool> {
+    let Some(mut current_task) = load_current_active_task_for_claim_repair(run_id, &task.task_id)?
+    else {
+        return Ok(false);
+    };
+    if load_claim(run_id, &task.task_id).is_ok() {
+        return Ok(false);
+    }
+    if should_defer_missing_claim_repair(&current_task) {
+        return Ok(false);
+    }
+
+    let details = missing_claim_details(&current_task);
+    let provider = current_task.assigned_provider.clone();
+    append_event_with_provider(
+        run_id,
+        "task_claim_missing",
+        Some(&current_task.task_id),
+        provider.as_deref(),
+        current_task.task_category,
+        current_task.provider_hint.as_deref(),
+        &with_driver_context(
+            format!(
+                "Detected missing claim file for active task {}. {}.",
+                current_task.title, details
+            ),
+            std::process::id(),
+        ),
+    )?;
+
+    current_task.attempt_count = current_task.attempt_count.saturating_sub(1);
+    current_task.status = stale_claim_recovery_status(&current_task);
+    current_task.claimed_by = None;
+    current_task.artifact_summary = None;
+    current_task.failure_kind = Some(TaskFailureKind::ClaimLost);
+    current_task.recovery_action = Some(TaskRecoveryAction::ReconcileState);
+    current_task.updated_at = now;
+    write_json_atomic(&task_path(run_id, &current_task.task_id), &current_task)?;
+    index_task(&current_task);
+
+    append_event_with_provider(
+        run_id,
+        "task_requeued",
+        Some(&current_task.task_id),
+        provider.as_deref(),
+        current_task.task_category,
+        current_task.provider_hint.as_deref(),
+        &with_driver_context(
+            format!(
+                "Recovered active task {} after missing claim detection. {}.",
+                current_task.title, details
+            ),
+            std::process::id(),
+        ),
+    )?;
+    Ok(true)
+}
+pub fn reconcile_orphaned_claim_files(run_id: &str) -> Result<bool> {
+    let mut changed = false;
+
+    for claim in load_claims(run_id) {
+        let current_task = match load_task(run_id, &claim.task_id) {
+            Ok(task) => task,
+            Err(_) => {
+                let _ = fs::remove_file(claim_path(run_id, &claim.task_id));
+                append_event(
+                    run_id,
+                    "task_claim_orphaned",
+                    Some(&claim.task_id),
+                    &with_driver_context(
+                        format!(
+                            "Removed orphan claim file for missing task {} owned by PID {}.",
+                            claim.task_id, claim.instance_pid
+                        ),
+                        std::process::id(),
+                    ),
+                )?;
+                changed = true;
+                continue;
+            }
+        };
+
+        if matches!(
+            current_task.status,
+            CoordinationTaskStatus::Running | CoordinationTaskStatus::Claiming
+        ) {
+            continue;
+        }
+
+        let status = current_task.status;
+        if current_task.claimed_by == Some(claim.instance_pid)
+            && should_defer_missing_claim_repair(&current_task)
+        {
+            continue;
+        }
+
+        if load_claim(run_id, &claim.task_id)
+            .map(|latest_claim| latest_claim.instance_pid != claim.instance_pid)
+            .unwrap_or(true)
+        {
+            continue;
+        }
+
+        let _ = fs::remove_file(claim_path(run_id, &claim.task_id));
+        append_event(
+            run_id,
+            "task_claim_orphaned",
+            Some(&claim.task_id),
+            &with_driver_context(
+                format!(
+                    "Removed orphan claim file for task {} because durable task status is {:?}, not running/claiming.",
+                    claim.task_id, status
+                ),
+                std::process::id(),
+            ),
+        )?;
+        changed = true;
+    }
+
+    Ok(changed)
+}

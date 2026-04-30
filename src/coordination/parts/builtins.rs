@@ -2,9 +2,19 @@ use super::*;
 #[allow(unused_imports)]
 use crate::config;
 #[allow(unused_imports)]
-use crate::AutonomousExecutionEnvironment;
+use crate::data::ChatSession;
 #[allow(unused_imports)]
-use crate::AutonomousWorkflowMode;
+use crate::memory;
+#[allow(unused_imports)]
+use crate::model::ModelProvider;
+#[allow(unused_imports)]
+use crate::provider_bridge::{
+    autonomous_provider_overrides, call_provider_cli_stream_with_overrides,
+};
+#[allow(unused_imports)]
+use crate::{
+    AutonomousExecutionEnvironment, AutonomousWorkflowMode, ReviewFixMode, ReviewScope, TurnPolicy,
+};
 #[allow(unused_imports)]
 use anyhow::{Context, Result};
 #[allow(unused_imports)]
@@ -34,12 +44,15 @@ use std::thread;
 use std::time::Duration;
 #[allow(unused_imports)]
 use uuid::Uuid;
+
 const SURVEY_WORKSPACE_LIMIT: usize = 200;
+
 #[derive(Deserialize)]
 pub struct SurveyWorkspaceSnapshot {
     directories: Vec<String>,
     files: Vec<String>,
 }
+
 fn survey_workspace_summary(
     task: &CoordinationTask,
     dirs: usize,
@@ -52,6 +65,7 @@ fn survey_workspace_summary(
         execution_mode, task.cwd, dirs, files
     )
 }
+
 pub fn collect_survey_workspace_entries(
     task: &CoordinationTask,
     run: &CoordinationRun,
@@ -71,6 +85,7 @@ pub fn collect_survey_workspace_entries(
     )?;
     Ok((dirs, files))
 }
+
 pub fn collect_survey_workspace_entries_runsc(
     task: &CoordinationTask,
     run: &CoordinationRun,
@@ -137,6 +152,7 @@ print(json.dumps({"directories": directories, "files": files}))
         serde_json::from_slice(&output.stdout).context("failed to parse runsc workspace survey")?;
     Ok((snapshot.directories, snapshot.files))
 }
+
 fn run_code_review_automated_checks_runsc(
     task: &CoordinationTask,
     run: &CoordinationRun,
@@ -155,6 +171,7 @@ fn run_code_review_automated_checks_runsc(
         .map(|(label, args)| run_one_code_review_check_runsc(task, run, label, &args))
         .collect()
 }
+
 fn run_one_code_review_check_runsc(
     task: &CoordinationTask,
     run: &CoordinationRun,
@@ -180,6 +197,7 @@ fn run_one_code_review_check_runsc(
     })?;
     Ok(summarize_code_review_check_output(label, output))
 }
+
 fn summarize_code_review_check_output(
     label: &str,
     output: std::process::Output,
@@ -225,6 +243,7 @@ fn summarize_code_review_check_output(
         summary,
     }
 }
+
 pub fn execute_survey_workspace(task: &CoordinationTask) -> Result<TaskArtifact> {
     let run = load_run(&task.run_id)?;
     ensure_task_workspace_exists(&run, task, task.assigned_provider.as_deref())?;
@@ -310,6 +329,7 @@ pub fn execute_survey_workspace(task: &CoordinationTask) -> Result<TaskArtifact>
         },
     })
 }
+
 pub fn execute_plan_code_review(task: &CoordinationTask) -> Result<TaskArtifact> {
     let run = load_run(&task.run_id)?;
     let scope = run.review_scope.clone().unwrap_or_default();
@@ -352,6 +372,65 @@ pub fn execute_plan_code_review(task: &CoordinationTask) -> Result<TaskArtifact>
         },
     })
 }
+
+pub fn execute_code_review_materialization(task: &CoordinationTask) -> Result<TaskArtifact> {
+    let metadata = load_review_task_metadata(&task.run_id, &task.task_id)
+        .context("review materialization task is missing review metadata")?;
+    let output_path = metadata
+        .output_path
+        .as_ref()
+        .context("review materialization task is missing output_path")?;
+    let artifacts = load_review_dependency_artifacts(&task.run_id, &task.dependencies)?;
+    let workspace_name = Path::new(&task.cwd)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("workspace");
+    let document = code_review::render_review_document(
+        workspace_name,
+        Utc::now().date_naive(),
+        &metadata.scope_description,
+        &metadata,
+        &artifacts,
+    );
+    let candidate = Path::new(&task.cwd).join(output_path);
+    let parent = candidate
+        .parent()
+        .context("review output path missing parent")?;
+    fs::create_dir_all(parent)?;
+    fs::write(&candidate, &document)
+        .with_context(|| format!("failed to write {}", candidate.display()))?;
+    Ok(TaskArtifact {
+        run_id: task.run_id.clone(),
+        task_id: task.task_id.clone(),
+        provider: None,
+        task_category: None,
+        fallback_from: None,
+        summary: format!("Materialized code review document at {}.", output_path),
+        body: document.clone(),
+        completed_at: Utc::now(),
+        report: TaskExecutionReport {
+            outcome: CoordinationTaskOutcome::CompletedWithChanges,
+            summary: format!("Materialized code review document at {}.", output_path),
+            details: format!(
+                "Wrote the aggregated code review document to `{}`.",
+                output_path
+            ),
+            changed_files: vec![output_path.clone()],
+            tests_run: metadata
+                .automated_checks
+                .iter()
+                .map(|check| check.command.clone())
+                .collect(),
+            warnings: metadata.profile_warnings.clone(),
+            design_requirements_satisfied: vec![
+                format!("Wrote the review document to {}.", output_path),
+                "Ordered findings by severity with file:line references.".to_string(),
+            ],
+            ..Default::default()
+        },
+    })
+}
+
 pub fn is_provider_backed(task: &CoordinationTask) -> bool {
     if task.kind == CoordinationTaskKind::PlanCodeReview {
         return false;
@@ -381,6 +460,7 @@ pub fn is_provider_backed(task: &CoordinationTask) -> bool {
             | CoordinationTaskKind::PerfEvaluate
     )
 }
+
 pub fn load_review_automated_checks(
     run_id: &str,
     dependencies: &[String],
@@ -407,6 +487,7 @@ pub fn load_review_automated_checks(
     }
     Vec::new()
 }
+
 pub fn load_review_dependency_artifacts(
     run_id: &str,
     dependencies: &[String],

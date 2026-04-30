@@ -10,13 +10,18 @@ use rust_debug::tracing::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::model::ModelProvider;
+use crate::provider_bridge::{
+    autonomous_provider_overrides_with_execution, call_provider_cli_stream_with_overrides,
+};
 use crate::{AutonomousExecutionEnvironment, TurnPolicy};
 mod parsing;
 mod parsing_actions;
 mod runtime;
 mod runtime_support;
+mod session;
 #[cfg(test)]
 mod tests;
+pub(crate) use session::make_council_provider_session;
 /// Number of turns without progress before issuing a soft nudge to council members.
 /// After 3 turns, the council may be stuck in circular discussion.
 const SOFT_STALL_TURNS: u32 = 3;

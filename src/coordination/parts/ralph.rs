@@ -1,6 +1,20 @@
 use super::*;
 #[allow(unused_imports)]
-use crate::AutonomousWorkflowMode;
+use crate::config;
+#[allow(unused_imports)]
+use crate::data::ChatSession;
+#[allow(unused_imports)]
+use crate::memory;
+#[allow(unused_imports)]
+use crate::model::ModelProvider;
+#[allow(unused_imports)]
+use crate::provider_bridge::{
+    autonomous_provider_overrides, call_provider_cli_stream_with_overrides,
+};
+#[allow(unused_imports)]
+use crate::{
+    AutonomousExecutionEnvironment, AutonomousWorkflowMode, ReviewFixMode, ReviewScope, TurnPolicy,
+};
 #[allow(unused_imports)]
 use anyhow::{Context, Result};
 #[allow(unused_imports)]
@@ -30,18 +44,21 @@ use std::thread;
 use std::time::Duration;
 #[allow(unused_imports)]
 use uuid::Uuid;
+
 pub fn ralph_execute_template_path(run_id: &str) -> String {
     std::env::temp_dir()
         .join(format!("ralph_execute_template_{run_id}.json"))
         .to_string_lossy()
         .into_owned()
 }
+
 pub fn ralph_verify_template_path(run_id: &str) -> String {
     std::env::temp_dir()
         .join(format!("ralph_verify_template_{run_id}.json"))
         .to_string_lossy()
         .into_owned()
 }
+
 pub fn build_ralph_execute_prompt(run: &CoordinationRun, iteration: u32) -> String {
     let notes = if run.notes.trim().is_empty() {
         "<none>"
@@ -77,6 +94,7 @@ Instructions:
         iteration, run.goal, run.completion_criteria, notes, template_path
     )
 }
+
 pub fn build_ralph_plan_prompt(run: &CoordinationRun, iteration: u32) -> String {
     let notes = if run.notes.trim().is_empty() {
         "<none>"
@@ -118,6 +136,7 @@ Instructions:
         iteration, run.goal, run.completion_criteria, notes, lifecycle
     )
 }
+
 pub fn build_ralph_verify_prompt(run: &CoordinationRun, iteration: u32) -> String {
     let template_path = ralph_verify_template_path(&run.run_id);
     format!(
@@ -140,6 +159,7 @@ Instructions:
         iteration, run.goal, run.completion_criteria, template_path
     )
 }
+
 pub fn ralph_execute_tools(allow_write_tasks: bool) -> Vec<String> {
     let mut tools = vec!["filesystem".to_string(), "search".to_string()];
     if allow_write_tasks {
@@ -147,6 +167,7 @@ pub fn ralph_execute_tools(allow_write_tasks: bool) -> Vec<String> {
     }
     tools
 }
+
 pub fn ralph_execute_write_scope(run_id: &str, allow_write_tasks: bool) -> Vec<String> {
     let template_path = ralph_execute_template_path(run_id);
     if allow_write_tasks {
@@ -155,6 +176,7 @@ pub fn ralph_execute_write_scope(run_id: &str, allow_write_tasks: bool) -> Vec<S
         vec![template_path]
     }
 }
+
 pub fn ralph_verify_tools() -> Vec<String> {
     vec![
         "filesystem".to_string(),
@@ -162,6 +184,7 @@ pub fn ralph_verify_tools() -> Vec<String> {
         "edit".to_string(),
     ]
 }
+
 pub fn ralph_verify_read_scope(run_id: &str) -> Vec<String> {
     vec![
         "**".to_string(),
@@ -169,9 +192,11 @@ pub fn ralph_verify_read_scope(run_id: &str) -> Vec<String> {
         ralph_verify_template_path(run_id),
     ]
 }
+
 pub fn ralph_verify_write_scope(run_id: &str) -> Vec<String> {
     vec![ralph_verify_template_path(run_id)]
 }
+
 pub fn parse_ralph_verification(body: &str, run_id: &str) -> Result<RalphVerificationResult> {
     // Prefer the provider response, then fall back to the template file if needed.
     let template_path = ralph_verify_template_path(run_id);
@@ -195,6 +220,7 @@ pub fn parse_ralph_verification(body: &str, run_id: &str) -> Result<RalphVerific
     }
     Ok(parsed)
 }
+
 pub fn parse_ralph_execution(body: &str, run_id: &str) -> Result<RalphExecutionResult> {
     // Prefer the provider response, then fall back to the template file if needed.
     let template_path = ralph_execute_template_path(run_id);
@@ -230,6 +256,7 @@ pub fn parse_ralph_execution(body: &str, run_id: &str) -> Result<RalphExecutionR
     }
     Ok(parsed)
 }
+
 pub fn expand_ralph_iteration(
     run_id: &str,
     verify_task: &CoordinationTask,
@@ -358,6 +385,7 @@ pub fn expand_ralph_iteration(
     )?;
     Ok(())
 }
+
 pub fn derive_run_status(
     tasks: &[CoordinationTask],
     completion_gate_issues: &[String],
@@ -405,6 +433,7 @@ pub fn derive_run_status(
     }
     CoordinationRunStatus::WaitingForArtifacts
 }
+
 pub fn merge_derived_run_status(
     current_status: &CoordinationRunStatus,
     derived_status: CoordinationRunStatus,
@@ -415,6 +444,58 @@ pub fn merge_derived_run_status(
         derived_status
     }
 }
+
+pub fn run_completion_gate_issues(
+    run: &CoordinationRun,
+    tasks: &[CoordinationTask],
+) -> Result<Vec<String>> {
+    let mut issues = Vec::new();
+
+    for task in tasks {
+        let artifact_path = artifact_result_path(&run.run_id, &task.task_id);
+        if !artifact_path.is_file() {
+            if !completed_task_has_acceptable_artifact_fallback(task) {
+                issues.push(format!("missing artifact for {}", task.title));
+            }
+            continue;
+        }
+
+        let raw = fs::read_to_string(&artifact_path)
+            .with_context(|| format!("failed to read {}", artifact_path.display()))?;
+        let artifact: TaskArtifact = serde_json::from_str(&raw)
+            .with_context(|| format!("failed to parse {}", artifact_path.display()))?;
+
+        if !artifact.report.validation_errors.is_empty() {
+            issues.push(format!("{} has acceptance failures", task.title));
+        }
+
+        let superseded_partial = artifact.report.outcome == CoordinationTaskOutcome::Partial
+            && (superseded_partial_planning_task(tasks, task)
+                || (uses_lightweight_runtime_mode(&run.workflow_mode)
+                    && lightweight_review_task_is_superseded(tasks, task))
+                || superseded_partial_lightweight_publish_task(run, tasks, task)
+                || superseded_partial_lightweight_write_task(run, tasks, task)
+                || superseded_partial_branch_fix_write_task(run, tasks, task));
+
+        if !superseded_partial
+            && matches!(
+                artifact.report.outcome,
+                CoordinationTaskOutcome::Blocked
+                    | CoordinationTaskOutcome::Partial
+                    | CoordinationTaskOutcome::Failed
+            )
+        {
+            issues.push(format!(
+                "{} ended with outcome {}",
+                task.title,
+                artifact.report.outcome.as_str()
+            ));
+        }
+    }
+
+    Ok(issues)
+}
+
 pub(crate) fn completed_task_has_acceptable_artifact_fallback(task: &CoordinationTask) -> bool {
     task.status == CoordinationTaskStatus::Completed
         && task
@@ -423,6 +504,7 @@ pub(crate) fn completed_task_has_acceptable_artifact_fallback(task: &Coordinatio
             .map(|summary| !summary.trim().is_empty())
             .unwrap_or(false)
 }
+
 fn superseded_partial_planning_task(tasks: &[CoordinationTask], task: &CoordinationTask) -> bool {
     matches!(
         task.kind,
@@ -431,6 +513,7 @@ fn superseded_partial_planning_task(tasks: &[CoordinationTask], task: &Coordinat
         .iter()
         .any(|candidate| candidate.parent_task_id.as_deref() == Some(task.task_id.as_str()))
 }
+
 fn superseded_partial_branch_fix_write_task(
     run: &CoordinationRun,
     tasks: &[CoordinationTask],
@@ -446,6 +529,7 @@ fn superseded_partial_branch_fix_write_task(
                     .any(|dependency| dependency == &task.task_id)
         })
 }
+
 fn superseded_partial_lightweight_publish_task(
     run: &CoordinationRun,
     tasks: &[CoordinationTask],
@@ -466,6 +550,7 @@ fn superseded_partial_lightweight_publish_task(
                     .any(|dependency| dependency == &task.task_id)
         })
 }
+
 fn superseded_partial_lightweight_write_task(
     run: &CoordinationRun,
     tasks: &[CoordinationTask],
@@ -482,6 +567,7 @@ fn superseded_partial_lightweight_write_task(
                 && review_chain_has_completed_no_change(tasks, &candidate.task_id)
         })
 }
+
 fn review_chain_has_completed_no_change(tasks: &[CoordinationTask], review_task_id: &str) -> bool {
     let mut stack = vec![review_task_id.to_string()];
     let mut seen = BTreeSet::new();
@@ -515,6 +601,7 @@ fn review_chain_has_completed_no_change(tasks: &[CoordinationTask], review_task_
 
     false
 }
+
 pub fn completed_task_generations(
     tasks: &[CoordinationTask],
 ) -> std::collections::HashMap<String, u32> {
@@ -524,6 +611,7 @@ pub fn completed_task_generations(
         .map(|task| (task.task_id.clone(), effective_dependency_generation(task)))
         .collect()
 }
+
 pub fn task_dependencies_completed(
     task: &CoordinationTask,
     completed: &std::collections::HashMap<String, u32>,
@@ -532,6 +620,7 @@ pub fn task_dependencies_completed(
         completed.get(dependency).copied() == Some(effective_dependency_generation(task))
     })
 }
+
 fn completed_dependency_generation(
     task: &CoordinationTask,
     completed: &std::collections::HashMap<String, u32>,
@@ -549,6 +638,7 @@ fn completed_dependency_generation(
         .all(|generation| generation == first)
         .then_some(first)
 }
+
 pub fn unblock_runnable_task_ids(tasks: &mut [CoordinationTask]) -> Vec<String> {
     let completed = completed_task_generations(tasks);
     let mut changed_task_ids = Vec::new();
@@ -588,6 +678,7 @@ pub fn unblock_runnable_task_ids(tasks: &mut [CoordinationTask]) -> Vec<String> 
 
     changed_task_ids
 }
+
 pub fn unblock_runnable_tasks(tasks: &mut [CoordinationTask]) -> bool {
     !unblock_runnable_task_ids(tasks).is_empty()
 }

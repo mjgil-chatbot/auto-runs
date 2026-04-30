@@ -29,6 +29,7 @@ pub mod types;
 pub use types::*;
 #[path = "parts/claim_diagnostics.rs"]
 pub mod claim_diagnostics;
+pub use claim_diagnostics::*;
 #[path = "parts/claim_consistency.rs"]
 pub mod claim_consistency;
 pub use claim_consistency::*;
@@ -128,6 +129,7 @@ pub mod perf_benchmark;
 pub use perf_benchmark::*;
 #[path = "parts/perf_failure_recovery.rs"]
 pub mod perf_failure_recovery;
+pub use perf_failure_recovery::*;
 #[path = "parts/perf_worktree.rs"]
 pub mod perf_worktree;
 pub use perf_worktree::*;
