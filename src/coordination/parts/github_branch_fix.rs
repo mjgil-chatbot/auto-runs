@@ -1,4 +1,5 @@
 use super::*;
+
 pub const GITHUB_BRANCH_FIX_BRANCH_NOTE_KEY: &str = "github_branch_fix_branch";
 pub const GITHUB_BRANCH_FIX_POLL_MINUTES_NOTE_KEY: &str = "github_branch_fix_poll_minutes";
 pub const GITHUB_BRANCH_FIX_SOURCE_WORKSPACE_NOTE_KEY: &str = "github_branch_fix_source_workspace";
@@ -8,11 +9,13 @@ const GITHUB_BRANCH_FIX_PLAN_TIMEOUT_MINUTES: u32 = 60;
 const GITHUB_BRANCH_FIX_RUN_WORKTREE_SUFFIX_LEN: usize = 8;
 const GITHUB_BRANCH_FIX_PUBLISH_RECOVERY_MARKER: &str = "Git publish recovery context:";
 const GITHUB_BRANCH_FIX_GH_AUTH_REQUIREMENT: &str = "Before any `gh` Actions or API call, verify `gh auth status` succeeds. If your `gh` build supports `gh auth status --active`, that is preferred; otherwise fall back to plain `gh auth status`. Use existing `gh auth login` state or an authenticated `GH_TOKEN`/`GITHUB_TOKEN`; do not rely on anonymous GitHub API access. `gh run list` uses the GitHub REST API core rate limit, which is much lower when unauthenticated. If a `gh` call returns HTTP 403, check `gh auth status` and `gh api rate_limit` before continuing.";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GithubBranchFixConfig {
     pub branch: String,
     pub poll_minutes: u32,
 }
+
 pub fn github_branch_fix_notes_with_settings(
     notes: &str,
     branch: &str,
@@ -29,6 +32,7 @@ pub fn github_branch_fix_notes_with_settings(
         &poll_minutes.max(1).to_string(),
     )
 }
+
 pub fn github_branch_fix_config_from_run(run: &CoordinationRun) -> Option<GithubBranchFixConfig> {
     (run.workflow_mode == AutonomousWorkflowMode::GithubBranchFix).then(|| GithubBranchFixConfig {
         branch: lightweight_runtime_note_setting_value(
@@ -46,12 +50,15 @@ pub fn github_branch_fix_config_from_run(run: &CoordinationRun) -> Option<Github
         .unwrap_or(DEFAULT_GITHUB_BRANCH_FIX_POLL_MINUTES),
     })
 }
+
 pub fn github_branch_fix_branch(run: &CoordinationRun) -> Option<String> {
     github_branch_fix_config_from_run(run).map(|config| config.branch)
 }
+
 pub fn github_branch_fix_poll_minutes(run: &CoordinationRun) -> Option<u32> {
     github_branch_fix_config_from_run(run).map(|config| config.poll_minutes)
 }
+
 pub fn github_branch_fix_source_workspace(run: &CoordinationRun) -> Option<String> {
     (run.workflow_mode == AutonomousWorkflowMode::GithubBranchFix).then(|| {
         lightweight_runtime_note_setting_value(
@@ -63,6 +70,7 @@ pub fn github_branch_fix_source_workspace(run: &CoordinationRun) -> Option<Strin
         .to_string()
     })
 }
+
 pub fn github_branch_fix_worktree_path(run: &CoordinationRun) -> Option<String> {
     (run.workflow_mode == AutonomousWorkflowMode::GithubBranchFix).then(|| {
         lightweight_runtime_note_setting_value(&run.notes, GITHUB_BRANCH_FIX_WORKTREE_PATH_NOTE_KEY)
@@ -71,6 +79,7 @@ pub fn github_branch_fix_worktree_path(run: &CoordinationRun) -> Option<String> 
             .to_string()
     })
 }
+
 pub fn github_branch_fix_publish_failure_should_respawn(
     run: &CoordinationRun,
     task: &CoordinationTask,
@@ -79,6 +88,7 @@ pub fn github_branch_fix_publish_failure_should_respawn(
         && task.kind == CoordinationTaskKind::GeneratedWriteTask
         && task.attempt_count < task.max_attempts.max(1)
 }
+
 pub fn github_branch_fix_publish_failure_prompt(prompt: &str, failure_message: &str) -> String {
     let base = prompt
         .split_once(GITHUB_BRANCH_FIX_PUBLISH_RECOVERY_MARKER)
@@ -89,10 +99,49 @@ pub fn github_branch_fix_publish_failure_prompt(prompt: &str, failure_message: &
         marker = GITHUB_BRANCH_FIX_PUBLISH_RECOVERY_MARKER,
     )
 }
+
 pub fn github_branch_fix_task_has_publish_recovery(task: &CoordinationTask) -> bool {
     task.prompt
         .contains(GITHUB_BRANCH_FIX_PUBLISH_RECOVERY_MARKER)
 }
+
+pub fn requeue_github_branch_fix_publish_failure(
+    run_id: &str,
+    task: &mut CoordinationTask,
+    provider_name: &str,
+    failure_message: &str,
+) -> Result<bool> {
+    let run = load_run(run_id)?;
+    if !github_branch_fix_publish_failure_should_respawn(&run, task) {
+        return Ok(false);
+    }
+
+    let now = Utc::now();
+    let current_attempt = task.attempt_count.max(1);
+    task.prompt = github_branch_fix_publish_failure_prompt(&task.prompt, failure_message);
+    task.status = CoordinationTaskStatus::Queued;
+    task.claimed_by = None;
+    task.artifact_summary = Some(failure_message.to_string());
+    task.updated_at = now;
+    write_json_atomic(&task_path(run_id, &task.task_id), task)?;
+    index_task(task);
+    let _ = fs::remove_file(claim_path(run_id, &task.task_id));
+    append_event_with_provider(
+        run_id,
+        "task_retry_scheduled",
+        Some(&task.task_id),
+        Some(provider_name),
+        task.task_category,
+        task.provider_hint.as_deref(),
+        &format!(
+            "Retry scheduled: {} after automatic git publish failed on attempt {}/{}. Requeued the same branch-fix task so the worker can repair the publish blocker and finish the commit/push. {}",
+            task.title, current_attempt, task.max_attempts, failure_message
+        ),
+    )?;
+    sync_run_summary_after_task_update(run_id, now)?;
+    Ok(true)
+}
+
 pub fn github_branch_fix_generated_task_prompt(run: &CoordinationRun, prompt: &str) -> String {
     let branch = github_branch_fix_config_from_run(run)
         .expect("GitHub branch fix config should exist for generated task prompts");
@@ -106,6 +155,7 @@ pub fn github_branch_fix_generated_task_prompt(run: &CoordinationRun, prompt: &s
         prompt
     )
 }
+
 /// Tight fix-only plan prompt — used when CI has already failed and we need
 /// the LLM to focus on parsing the failure and emitting targeted fix tasks.
 /// Much shorter than the full bootstrap prompt to save tokens.
@@ -122,6 +172,7 @@ Rules: title = commit message, max 3 write_scope entries, prefer 3-8 narrow task
         GITHUB_BRANCH_FIX_GH_AUTH_REQUIREMENT
     )
 }
+
 pub fn validate_github_branch_fix_notes(notes: &str) -> Result<()> {
     let branch = lightweight_runtime_note_setting_value(notes, GITHUB_BRANCH_FIX_BRANCH_NOTE_KEY)
         .map(str::trim)
@@ -141,6 +192,7 @@ pub fn validate_github_branch_fix_notes(notes: &str) -> Result<()> {
     }
     Ok(())
 }
+
 pub fn validate_github_branch_fix_workspace_input(input: &UpsertRunInput) -> Result<()> {
     if input.workflow_mode != AutonomousWorkflowMode::GithubBranchFix {
         return Ok(());
@@ -158,6 +210,7 @@ pub fn validate_github_branch_fix_workspace_input(input: &UpsertRunInput) -> Res
     }
     Ok(())
 }
+
 pub fn prepare_github_branch_fix_workspace(run: &mut CoordinationRun) -> Result<()> {
     if run.workflow_mode != AutonomousWorkflowMode::GithubBranchFix {
         return Ok(());
@@ -220,6 +273,7 @@ pub fn prepare_github_branch_fix_workspace(run: &mut CoordinationRun) -> Result<
     );
     Ok(())
 }
+
 pub fn ensure_github_branch_fix_workspace_ready(run: &mut CoordinationRun) -> Result<bool> {
     if run.workflow_mode != AutonomousWorkflowMode::GithubBranchFix {
         return Ok(false);
@@ -236,6 +290,7 @@ pub fn ensure_github_branch_fix_workspace_ready(run: &mut CoordinationRun) -> Re
     prepare_github_branch_fix_workspace(run)?;
     Ok(true)
 }
+
 pub fn seed_github_branch_fix_tasks(run: &CoordinationRun) -> Vec<CoordinationTask> {
     let goal = provider_prompt_text_for_run(run, &run.goal);
     let branch = github_branch_fix_config_from_run(run)
@@ -393,6 +448,7 @@ Rules:\n\
 
     tasks
 }
+
 pub fn github_branch_fix_review_prompt(run: &CoordinationRun) -> String {
     let branch = github_branch_fix_config_from_run(run)
         .expect("GitHub branch fix config should exist for GitHub branch fix review prompts");
@@ -416,6 +472,7 @@ If the implementation is complete:\n\
         gh_auth_requirement = GITHUB_BRANCH_FIX_GH_AUTH_REQUIREMENT,
     )
 }
+
 fn github_branch_fix_input_branch(input: &UpsertRunInput) -> Result<String> {
     lightweight_runtime_note_setting_value(&input.notes, GITHUB_BRANCH_FIX_BRANCH_NOTE_KEY)
         .map(str::trim)
@@ -423,11 +480,13 @@ fn github_branch_fix_input_branch(input: &UpsertRunInput) -> Result<String> {
         .map(str::to_string)
         .context("github_branch_fix_branch is required for GitHub branch fix runs")
 }
+
 fn github_branch_fix_source_workspace_path(run: &CoordinationRun) -> Result<PathBuf> {
     let source = github_branch_fix_source_workspace(run)
         .context("GitHub branch fix source workspace should exist before preparing worktree")?;
     canonical_primary_github_branch_fix_workspace(&source)
 }
+
 fn canonical_primary_github_branch_fix_workspace(raw: &str) -> Result<PathBuf> {
     match inspect_github_branch_fix_workspace(Path::new(raw.trim()), "main")? {
         GithubBranchFixWorkspace::PrimaryCheckout { source_workspace } => Ok(source_workspace),
@@ -436,6 +495,7 @@ fn canonical_primary_github_branch_fix_workspace(raw: &str) -> Result<PathBuf> {
         }
     }
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum GithubBranchFixWorkspace {
     PrimaryCheckout {
@@ -446,6 +506,7 @@ enum GithubBranchFixWorkspace {
         worktree_path: PathBuf,
     },
 }
+
 fn inspect_github_branch_fix_workspace(
     workspace: &Path,
     branch: &str,
@@ -492,6 +553,7 @@ fn inspect_github_branch_fix_workspace(
         worktree_path: canonical_workspace,
     })
 }
+
 fn github_branch_fix_workspace_from_notes(
     run: &CoordinationRun,
     branch: &str,
@@ -517,6 +579,7 @@ fn github_branch_fix_workspace_from_notes(
         },
     })
 }
+
 fn github_branch_fix_target_worktree_path(
     source_workspace: &Path,
     branch: &str,
@@ -531,6 +594,7 @@ fn github_branch_fix_target_worktree_path(
         "{source_text}-{suffix}-{run_suffix}"
     )))
 }
+
 fn sanitize_github_branch_fix_branch_for_path(branch: &str) -> String {
     let mut result = String::new();
     let mut last_was_separator = false;
@@ -554,6 +618,7 @@ fn sanitize_github_branch_fix_branch_for_path(branch: &str) -> String {
         trimmed.to_string()
     }
 }
+
 fn github_branch_fix_run_worktree_suffix(run_id: Option<&str>) -> String {
     let raw = run_id.unwrap_or("run");
     let mut suffix = raw
@@ -567,6 +632,7 @@ fn github_branch_fix_run_worktree_suffix(run_id: Option<&str>) -> String {
     }
     suffix
 }
+
 fn create_github_branch_fix_worktree(
     source_workspace: &Path,
     worktree_path: &Path,
@@ -617,6 +683,7 @@ fn create_github_branch_fix_worktree(
     )?;
     Ok(())
 }
+
 fn checkout_github_branch_fix_worktree_branch(
     source_workspace: &Path,
     worktree_path: &Path,
@@ -641,6 +708,7 @@ fn checkout_github_branch_fix_worktree_branch(
     github_branch_fix_run_git(worktree_path, &["checkout", "-B", branch, "HEAD"])?;
     Ok(())
 }
+
 fn github_branch_fix_worktree_matches(
     source_workspace: &Path,
     worktree_path: &Path,
@@ -655,6 +723,7 @@ fn github_branch_fix_worktree_matches(
     let source_common_dir = github_branch_fix_git_common_dir(source_workspace)?;
     Ok(worktree_common_dir == source_common_dir)
 }
+
 fn github_branch_fix_local_branch_exists(source_workspace: &Path, branch: &str) -> bool {
     github_branch_fix_git_status(
         source_workspace,
@@ -666,6 +735,7 @@ fn github_branch_fix_local_branch_exists(source_workspace: &Path, branch: &str) 
         ],
     )
 }
+
 fn github_branch_fix_remote_branch_exists(source_workspace: &Path, branch: &str) -> bool {
     github_branch_fix_git_status(
         source_workspace,
@@ -677,9 +747,11 @@ fn github_branch_fix_remote_branch_exists(source_workspace: &Path, branch: &str)
         ],
     )
 }
+
 fn github_branch_fix_current_branch(worktree_path: &Path) -> Result<String> {
     github_branch_fix_run_git(worktree_path, &["rev-parse", "--abbrev-ref", "HEAD"])
 }
+
 fn github_branch_fix_git_common_dir(workspace: &Path) -> Result<PathBuf> {
     let common_dir = github_branch_fix_run_git(workspace, &["rev-parse", "--git-common-dir"])?;
     let common_dir_path = Path::new(common_dir.trim());
@@ -695,10 +767,12 @@ fn github_branch_fix_git_common_dir(workspace: &Path) -> Result<PathBuf> {
         )
     })
 }
+
 fn github_branch_fix_git_repo_root(workspace: &Path) -> Result<PathBuf> {
     let root = github_branch_fix_run_git(workspace, &["rev-parse", "--show-toplevel"])?;
     Ok(PathBuf::from(root))
 }
+
 fn github_branch_fix_run_git(workspace: &Path, args: &[&str]) -> Result<String> {
     let output = std::process::Command::new("git")
         .arg("-C")
@@ -717,6 +791,7 @@ fn github_branch_fix_run_git(workspace: &Path, args: &[&str]) -> Result<String> 
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
+
 fn github_branch_fix_git_status(workspace: &Path, args: &[&str]) -> bool {
     std::process::Command::new("git")
         .arg("-C")

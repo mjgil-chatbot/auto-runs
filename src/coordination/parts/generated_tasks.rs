@@ -1,7 +1,9 @@
 use super::*;
+
 pub fn extract_first_json_object(body: &str) -> Option<&str> {
     extract_balanced_json(body, '{', '}')
 }
+
 pub fn extract_first_json_array(body: &str) -> Option<&str> {
     let mut fallback = None;
     let mut search_from = 0usize;
@@ -21,10 +23,12 @@ pub fn extract_first_json_array(body: &str) -> Option<&str> {
 
     fallback
 }
+
 pub fn extract_balanced_json(body: &str, open_ch: char, close_ch: char) -> Option<&str> {
     let start = body.find(open_ch)?;
     extract_balanced_json_from(body, start, open_ch, close_ch)
 }
+
 fn extract_balanced_json_from(
     body: &str,
     start: usize,
@@ -65,6 +69,7 @@ fn extract_balanced_json_from(
 
     None
 }
+
 pub fn parse_generated_kind(kind: &str) -> Result<CoordinationTaskKind> {
     match kind.trim().to_ascii_lowercase().as_str() {
         "write" | "edit" => Ok(CoordinationTaskKind::GeneratedWriteTask),
@@ -75,6 +80,34 @@ pub fn parse_generated_kind(kind: &str) -> Result<CoordinationTaskKind> {
         ),
     }
 }
+
+pub fn resolve_generated_task_provider(
+    run: &CoordinationRun,
+    provider: Option<&str>,
+    index: usize,
+) -> Option<String> {
+    if uses_lightweight_runtime_mode(&run.workflow_mode) {
+        return lightweight_generated_task_provider(run, provider, index);
+    }
+
+    match run.workflow_mode {
+        AutonomousWorkflowMode::RalphLoop => {
+            normalize_provider_name(provider).or_else(|| Some(run.provider.clone()))
+        }
+        AutonomousWorkflowMode::SingleProvider => Some(run.provider.clone()),
+        AutonomousWorkflowMode::DesignConsensus
+        | AutonomousWorkflowMode::DesignImplementation
+        | AutonomousWorkflowMode::CodeReview => {
+            let providers = all_provider_names();
+            Some(providers[index % providers.len()].clone())
+        }
+        AutonomousWorkflowMode::LightweightImplementation
+        | AutonomousWorkflowMode::GithubBranchFix => unreachable!(),
+        AutonomousWorkflowMode::FreeformCouncil => Some(run.provider.clone()),
+        AutonomousWorkflowMode::PerfHillClimber => None,
+    }
+}
+
 pub fn normalize_provider_name(provider: Option<&str>) -> Option<String> {
     let provider = provider?.trim();
     match provider.to_ascii_lowercase().as_str() {
@@ -83,6 +116,7 @@ pub fn normalize_provider_name(provider: Option<&str>) -> Option<String> {
         _ => ModelProvider::from_arg(provider).map(|provider| provider.as_str().to_string()),
     }
 }
+
 pub fn is_generated_task_kind(kind: &CoordinationTaskKind) -> bool {
     matches!(
         kind,

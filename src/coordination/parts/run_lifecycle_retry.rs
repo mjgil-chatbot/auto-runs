@@ -1,4 +1,5 @@
 use fs2::FileExt;
+
 pub fn requeue_failed_tasks_for_retry(
     run_id: &str,
     run: &CoordinationRun,
@@ -33,6 +34,7 @@ pub fn requeue_failed_tasks_for_retry(
     }
     Ok(changed)
 }
+
 pub fn should_auto_retry_task(
     run: &CoordinationRun,
     task: &CoordinationTask,
@@ -49,6 +51,7 @@ pub fn should_auto_retry_task(
         && failure_kind != TaskFailureKind::ProviderUnavailable
         && failure_kind != TaskFailureKind::Publish
 }
+
 pub fn blocked_write_failure_requires_manual_restart(task: &CoordinationTask) -> bool {
     task_mutates_workspace(task)
         && task
@@ -57,12 +60,14 @@ pub fn blocked_write_failure_requires_manual_restart(task: &CoordinationTask) ->
             .map(|summary| summary.contains("[blocked]"))
             .unwrap_or(false)
 }
+
 pub fn provider_unavailable_failure_requires_manual_restart(task: &CoordinationTask) -> bool {
     task.artifact_summary
         .as_deref()
         .map(|summary| summary.contains("[provider_unavailable]"))
         .unwrap_or(false)
 }
+
 pub fn git_publish_failure_requires_manual_restart(
     task: &CoordinationTask,
     failure_message: Option<&str>,
@@ -77,6 +82,7 @@ pub fn git_publish_failure_requires_manual_restart(
         .map(|summary| summary.contains("[git_publish_failed]"))
         .unwrap_or(false)
 }
+
 pub fn retry_reason_from_summary(summary: Option<&str>) -> String {
     summary
         .map(str::trim)
@@ -84,6 +90,7 @@ pub fn retry_reason_from_summary(summary: Option<&str>) -> String {
         .unwrap_or("Task failed without a recorded summary.")
         .to_string()
 }
+
 pub fn prune_expired_provider_cooldown_map(
     cooldowns: &mut BTreeMap<String, ProviderCooldown>,
     now: DateTime<Utc>,
@@ -92,9 +99,11 @@ pub fn prune_expired_provider_cooldown_map(
     cooldowns.retain(|_, cooldown| cooldown.unavailable_until > now);
     cooldowns.len() != before
 }
+
 pub fn prune_expired_provider_cooldowns(run: &mut CoordinationRun, now: DateTime<Utc>) -> bool {
     prune_expired_provider_cooldown_map(&mut run.provider_cooldowns, now)
 }
+
 pub fn refresh_run_provider_cooldowns(
     run: &mut CoordinationRun,
     tasks: &[CoordinationTask],
@@ -141,6 +150,7 @@ pub fn refresh_run_provider_cooldowns(
     }
     Ok(run_changed)
 }
+
 pub fn upsert_provider_cooldown(
     cooldowns: &mut BTreeMap<String, ProviderCooldown>,
     provider: &str,
@@ -154,6 +164,7 @@ pub fn upsert_provider_cooldown(
         }
     }
 }
+
 pub fn merge_provider_cooldowns(
     destination: &mut BTreeMap<String, ProviderCooldown>,
     source: &BTreeMap<String, ProviderCooldown>,
@@ -164,6 +175,7 @@ pub fn merge_provider_cooldowns(
     }
     changed
 }
+
 pub fn is_provider_on_cooldown<'a>(
     run: &'a CoordinationRun,
     provider: &str,
@@ -173,6 +185,7 @@ pub fn is_provider_on_cooldown<'a>(
     let cooldown = run.provider_cooldowns.get(normalized.as_str())?;
     (cooldown.unavailable_until > now).then_some(cooldown)
 }
+
 pub fn select_fallback_provider(
     run: &CoordinationRun,
     unavailable_provider: &str,
@@ -199,6 +212,7 @@ pub fn select_fallback_provider(
 
     candidates.into_iter().next()
 }
+
 /// Validate run input at the API boundary to catch configuration errors early.
 pub fn validate_run_input(input: &UpsertRunInput) -> Result<()> {
     if input.goal.trim().is_empty() {
@@ -250,6 +264,7 @@ pub fn validate_run_input(input: &UpsertRunInput) -> Result<()> {
     validate_perf_workspace_input(input)?;
     Ok(())
 }
+
 #[cfg(test)]
 pub fn resolve_provider_for_task_claim(
     run: &CoordinationRun,
@@ -265,6 +280,7 @@ pub fn resolve_provider_for_task_claim(
         now,
     )
 }
+
 pub fn resolve_provider_for_task_claim_with_category(
     run: &CoordinationRun,
     assigned_provider: Option<&str>,
@@ -294,6 +310,7 @@ pub fn resolve_provider_for_task_claim_with_category(
 
     select_fallback_provider(run, requested, now)
 }
+
 /// Select a fallback provider that supports a specific task category,
 /// using the registry's fallback chain and respecting cooldowns.
 pub fn select_category_fallback_provider(
@@ -324,17 +341,41 @@ pub fn select_category_fallback_provider(
 
     candidates.into_iter().next()
 }
+
 pub fn stale_claim_recovery_status(task: &CoordinationTask) -> CoordinationTaskStatus {
     let _ = task;
     CoordinationTaskStatus::Queued
 }
+
+pub fn completed_task_needs_manual_restart(run_id: &str, task: &CoordinationTask) -> Result<bool> {
+    let artifact_path = artifact_result_path(run_id, &task.task_id);
+    let Ok(raw) = fs::read_to_string(&artifact_path) else {
+        return Ok(true);
+    };
+    let Ok(artifact) = serde_json::from_str::<TaskArtifact>(&raw) else {
+        return Ok(true);
+    };
+    if matches!(
+        artifact.report.outcome,
+        CoordinationTaskOutcome::Blocked
+            | CoordinationTaskOutcome::Partial
+            | CoordinationTaskOutcome::Failed
+    ) || !artifact.report.validation_errors.is_empty()
+    {
+        return Ok(true);
+    }
+    Ok(!validate_task_artifact(run_id, task, &artifact)?.is_empty())
+}
+
 const AUTO_FIX_FAILED_RUN_RESTART_LIMIT_NOTE_KEY: &str = "auto_fix_failed_run_restarts";
 const AUTO_FIX_FAILED_RUN_RESTARTS_USED_NOTE_KEY: &str = "auto_fix_failed_run_restarts_used";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RestartMode {
     Manual,
     AutoSelfHeal,
 }
+
 pub fn maybe_auto_fix_failed_run(run_id: &str, run: &mut CoordinationRun) -> Result<bool> {
     // Provider outages need operator intervention, not repository repair.
     // Recognize legacy persisted failures that predate typed failure metadata.
@@ -382,6 +423,7 @@ pub fn maybe_auto_fix_failed_run(run_id: &str, run: &mut CoordinationRun) -> Res
     )?;
     Ok(true)
 }
+
 pub fn auto_fix_failed_run_restart_limit(run: &CoordinationRun) -> u32 {
     if let Some(limit) = note_setting_value(&run.notes, AUTO_FIX_FAILED_RUN_RESTART_LIMIT_NOTE_KEY)
         .and_then(|value| value.parse::<u32>().ok())
@@ -398,11 +440,13 @@ pub fn auto_fix_failed_run_restart_limit(run: &CoordinationRun) -> u32 {
         0
     }
 }
+
 pub fn auto_fix_failed_run_restarts_used(run: &CoordinationRun) -> u32 {
     note_setting_value(&run.notes, AUTO_FIX_FAILED_RUN_RESTARTS_USED_NOTE_KEY)
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(0)
 }
+
 pub fn repair_perf_workspace_for_manual_restart(
     run_id: &str,
     run: &mut CoordinationRun,
@@ -428,6 +472,7 @@ pub fn repair_perf_workspace_for_manual_restart(
 
     Ok(changed)
 }
+
 pub fn repair_lightweight_workspace_for_manual_restart(
     run_id: &str,
     run: &mut CoordinationRun,
@@ -459,6 +504,102 @@ pub fn repair_lightweight_workspace_for_manual_restart(
 
     Ok(changed)
 }
+
+pub fn maybe_prepare_post_failure_repair_task(
+    run_id: &str,
+    run: &mut CoordinationRun,
+    tasks: &mut Vec<CoordinationTask>,
+    new_generation: u32,
+    now: DateTime<Utc>,
+    restart_mode: RestartMode,
+) -> Result<Option<String>> {
+    if restart_mode != RestartMode::AutoSelfHeal
+        || !uses_lightweight_runtime_mode(&run.workflow_mode)
+    {
+        return Ok(None);
+    }
+
+    let restart_target_ids = restart_target_task_ids(run_id, run, tasks)?;
+    if restart_target_ids.is_empty() {
+        return Ok(None);
+    }
+
+    if let Some(existing_task_id) = existing_post_failure_repair_task_id(tasks) {
+        return Ok(Some(existing_task_id));
+    }
+
+    let dependency_ids = restart_target_dependency_ids(tasks, &restart_target_ids);
+    let task_id = Uuid::new_v4().to_string();
+    let title = "Repair repository after failed run".to_string();
+    let kind = CoordinationTaskKind::GeneratedWriteTask;
+    let task = CoordinationTask {
+        provider_hint: None,
+        required_role: None,
+        task_category: default_task_category_for_kind(&kind),
+        task_id: task_id.clone(),
+        run_id: run_id.to_string(),
+        parent_task_id: None,
+        kind: kind.clone(),
+        assigned_provider: resolve_generated_task_provider(run, None, 0),
+        iteration: None,
+        title: title.clone(),
+        prompt: lightweight_generated_task_prompt(
+            run,
+            &kind,
+            &post_failure_repair_prompt(run, tasks, &restart_target_ids),
+        ),
+        cwd: run.workspace_path.clone(),
+        allowed_tools: normalize_allowed_tools(
+            &kind,
+            vec!["filesystem".to_string(), "search".to_string()],
+        ),
+        read_scope: normalize_read_scope(&kind, vec!["**".to_string()]),
+        write_scope: normalize_write_scope(&kind, vec!["**".to_string()]),
+        acceptance_checks: normalize_acceptance_checks(
+            &kind,
+            vec![
+                "The repository builds successfully, or the report explains the exact remaining blocker."
+                    .to_string(),
+                "The repository test command was run, or the report explains why it could not run."
+                    .to_string(),
+                "The repair does not modify the current lightweight task list document; review owns task-list progression."
+                    .to_string(),
+            ],
+        ),
+        review_metadata: None,
+        dependencies: dependency_ids,
+        execution_generation: new_generation,
+        dependency_generation: None,
+        attempt_count: 0,
+        max_attempts: default_task_max_attempts(),
+        publish_attempt_count: 0,
+        estimated_minutes: Some(20),
+        status: CoordinationTaskStatus::Blocked,
+        claimed_by: None,
+        artifact_summary: None,
+        failure_kind: None,
+        recovery_action: None,
+        created_at: now,
+        updated_at: now,
+    };
+
+    write_json_atomic(&task_path(run_id, &task_id), &task)?;
+    index_task(&task);
+    tasks.push(task);
+    run.task_ids.push(task_id.clone());
+    run.updated_at = now;
+    write_json_atomic(&run_path(run_id), run)?;
+    index_run(run);
+    append_event(
+        run_id,
+        "task_generated",
+        Some(&task_id),
+        &format!("Generated post-failure repair task '{}'.", title),
+    )?;
+
+    Ok(Some(task_id))
+}
+
 fn existing_post_failure_repair_task_id(tasks: &[CoordinationTask]) -> Option<String> {
     tasks.iter().find_map(|task| {
         (task.title == "Repair repository after failed run"
@@ -475,15 +616,19 @@ fn existing_post_failure_repair_task_id(tasks: &[CoordinationTask]) -> Option<St
         .then(|| task.task_id.clone())
     })
 }
+
 pub(crate) struct FailedRunRestartLock(fs::File);
+
 impl Drop for FailedRunRestartLock {
     fn drop(&mut self) {
         let _ = self.0.unlock();
     }
 }
+
 fn failed_run_restart_lock_path(run_id: &str) -> PathBuf {
     run_dir(run_id).join("restart-failed.lock")
 }
+
 pub(crate) fn acquire_failed_run_restart_lock(run_id: &str) -> Result<FailedRunRestartLock> {
     let path = failed_run_restart_lock_path(run_id);
     let parent = path
@@ -500,6 +645,7 @@ pub(crate) fn acquire_failed_run_restart_lock(run_id: &str) -> Result<FailedRunR
         .with_context(|| format!("failed to lock {}", path.display()))?;
     Ok(FailedRunRestartLock(file))
 }
+
 pub fn repair_github_branch_fix_workspace_for_manual_restart(
     run_id: &str,
     run: &mut CoordinationRun,
@@ -525,6 +671,7 @@ pub fn repair_github_branch_fix_workspace_for_manual_restart(
 
     Ok(changed)
 }
+
 pub fn persist_restarted_task(
     run_id: &str,
     task: &CoordinationTask,
@@ -552,6 +699,7 @@ pub fn persist_restarted_task(
     cleanup(artifact_materialized_files_path(run_id, &task.task_id));
     write_json_atomic(&task_path(run_id, &task.task_id), task)
 }
+
 fn archive_active_task_artifacts(run_id: &str, task_id: &str, generation: u32) -> Result<()> {
     let files = [
         (
@@ -582,6 +730,7 @@ fn archive_active_task_artifacts(run_id: &str, task_id: &str, generation: u32) -
     }
     Ok(())
 }
+
 pub fn reset_downstream_tasks_for_restart(
     run_id: &str,
     tasks: &mut [CoordinationTask],
@@ -674,6 +823,7 @@ pub fn reset_downstream_tasks_for_restart(
 
     Ok(reset_count)
 }
+
 pub fn prepare_task_for_manual_restart(
     task: &mut CoordinationTask,
     now: DateTime<Utc>,
@@ -700,12 +850,15 @@ pub fn prepare_task_for_manual_restart(
     }
     Some(previous_generation)
 }
+
 const ABSOLUTE_MAX_ATTEMPTS: u32 = 10;
+
 pub fn manual_restart_max_attempts(task: &CoordinationTask) -> u32 {
     task.attempt_count
         .saturating_add(2)
         .min(ABSOLUTE_MAX_ATTEMPTS)
 }
+
 pub fn format_attempt_suffix(task: &CoordinationTask) -> String {
     if task.max_attempts <= 1 {
         String::new()
@@ -713,6 +866,7 @@ pub fn format_attempt_suffix(task: &CoordinationTask) -> String {
         format!(" (attempt {}/{})", task.attempt_count, task.max_attempts)
     }
 }
+
 /// Optional auto-prune hook that respects the `auto_prune_age_days` config.
 ///
 /// When `coordination.auto_prune_age_days` is set to `Some(N)`, coordination
@@ -730,6 +884,7 @@ pub fn maybe_auto_prune() -> anyhow::Result<u32> {
     };
     prune_old_coordination_runs(age_days)
 }
+
 fn note_setting_value<'a>(notes: &'a str, key: &str) -> Option<&'a str> {
     notes.lines().find_map(|line| {
         let trimmed = line.trim();
@@ -740,6 +895,7 @@ fn note_setting_value<'a>(notes: &'a str, key: &str) -> Option<&'a str> {
         })
     })
 }
+
 fn notes_with_setting(notes: &str, key: &str, value: &str) -> String {
     let prefix = format!("{key}=");
     let mut lines = notes
@@ -753,6 +909,43 @@ fn notes_with_setting(notes: &str, key: &str, value: &str) -> String {
     }
     lines.join("\n")
 }
+
+fn restart_target_task_ids(
+    run_id: &str,
+    run: &CoordinationRun,
+    tasks: &[CoordinationTask],
+) -> Result<BTreeSet<String>> {
+    let failed_or_canceled = tasks
+        .iter()
+        .filter(|task| {
+            matches!(
+                task.status,
+                CoordinationTaskStatus::Failed | CoordinationTaskStatus::Canceled
+            )
+        })
+        .map(|task| task.task_id.clone())
+        .collect::<BTreeSet<_>>();
+    if !failed_or_canceled.is_empty() {
+        return Ok(failed_or_canceled);
+    }
+
+    if run.status == CoordinationRunStatus::Failed
+        && tasks
+            .iter()
+            .all(|task| task.status == CoordinationTaskStatus::Completed)
+    {
+        let mut targets = BTreeSet::new();
+        for task in tasks {
+            if completed_task_needs_manual_restart(run_id, task)? {
+                targets.insert(task.task_id.clone());
+            }
+        }
+        return Ok(targets);
+    }
+
+    Ok(BTreeSet::new())
+}
+
 fn restart_target_dependency_ids(
     tasks: &[CoordinationTask],
     restart_target_ids: &BTreeSet<String>,
@@ -768,6 +961,7 @@ fn restart_target_dependency_ids(
     }
     dependency_ids.into_iter().collect()
 }
+
 fn post_failure_repair_prompt(
     run: &CoordinationRun,
     tasks: &[CoordinationTask],

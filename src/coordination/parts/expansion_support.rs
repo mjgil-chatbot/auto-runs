@@ -1,5 +1,21 @@
 use super::*;
 #[allow(unused_imports)]
+use crate::config;
+#[allow(unused_imports)]
+use crate::data::ChatSession;
+#[allow(unused_imports)]
+use crate::memory;
+#[allow(unused_imports)]
+use crate::model::ModelProvider;
+#[allow(unused_imports)]
+use crate::provider_bridge::{
+    autonomous_provider_overrides, call_provider_cli_stream_with_overrides,
+};
+#[allow(unused_imports)]
+use crate::{
+    AutonomousExecutionEnvironment, AutonomousWorkflowMode, ReviewFixMode, ReviewScope, TurnPolicy,
+};
+#[allow(unused_imports)]
 use anyhow::{Context, Result};
 #[allow(unused_imports)]
 use chrono::{DateTime, Utc};
@@ -28,6 +44,7 @@ use std::thread;
 use std::time::Duration;
 #[allow(unused_imports)]
 use uuid::Uuid;
+
 pub fn default_task_category_for_kind(kind: &CoordinationTaskKind) -> Option<TaskCategory> {
     match kind {
         CoordinationTaskKind::GeneratedWriteTask | CoordinationTaskKind::ApplyApprovedEdits => {
@@ -38,6 +55,7 @@ pub fn default_task_category_for_kind(kind: &CoordinationTaskKind) -> Option<Tas
         _ => None,
     }
 }
+
 pub fn seeded_acceptance_checks(
     kind: &CoordinationTaskKind,
     write_scope: &[String],
@@ -78,6 +96,7 @@ pub fn seeded_acceptance_checks(
         _ => Vec::new(),
     }
 }
+
 pub fn generated_task_label(kind: &CoordinationTaskKind) -> &'static str {
     match kind {
         CoordinationTaskKind::DraftDesignDoc => "design",
@@ -100,6 +119,7 @@ pub fn generated_task_label(kind: &CoordinationTaskKind) -> &'static str {
         CoordinationTaskKind::PerfEvaluate => "perf_evaluate",
     }
 }
+
 pub fn normalize_allowed_tools(
     kind: &CoordinationTaskKind,
     mut allowed_tools: Vec<String>,
@@ -117,6 +137,7 @@ pub fn normalize_allowed_tools(
     }
     allowed_tools
 }
+
 pub fn normalize_read_scope(kind: &CoordinationTaskKind, read_scope: Vec<String>) -> Vec<String> {
     if read_scope.is_empty() {
         match kind {
@@ -129,6 +150,7 @@ pub fn normalize_read_scope(kind: &CoordinationTaskKind, read_scope: Vec<String>
         read_scope
     }
 }
+
 pub fn normalize_write_scope(kind: &CoordinationTaskKind, write_scope: Vec<String>) -> Vec<String> {
     if kind == &CoordinationTaskKind::GeneratedWriteTask {
         write_scope
@@ -137,5 +159,23 @@ pub fn normalize_write_scope(kind: &CoordinationTaskKind, write_scope: Vec<Strin
             .collect()
     } else {
         Vec::new()
+    }
+}
+
+pub fn normalize_acceptance_checks(
+    kind: &CoordinationTaskKind,
+    acceptance_checks: Vec<String>,
+) -> Vec<String> {
+    let checks = normalize_string_list(acceptance_checks);
+    if !checks.is_empty() {
+        return checks;
+    }
+
+    match kind {
+        CoordinationTaskKind::GeneratedWriteTask => vec![
+            "The declared capability is implemented in the owned files.".to_string(),
+            "The owned files contain no blocked stub markers.".to_string(),
+        ],
+        _ => Vec::new(),
     }
 }

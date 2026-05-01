@@ -1,21 +1,26 @@
 use super::*;
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ArtifactContractMeta {
     pub payload_kind: TaskPayloadKind,
     pub contract_version: u32,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct MaterializedArtifactFile {
     pub path: String,
     pub content: String,
 }
+
 #[derive(Clone, Debug, Default)]
 pub struct WriteScopeSnapshot {
     pub file_hashes: BTreeMap<String, u64>,
 }
+
 pub fn artifact_contract_meta_path(run_id: &str, task_id: &str) -> PathBuf {
     artifact_dir(run_id, task_id).join("contract.json")
 }
+
 pub fn persist_artifact_contract_meta(
     run_id: &str,
     task_id: &str,
@@ -29,13 +34,29 @@ pub fn persist_artifact_contract_meta(
     fs::create_dir_all(artifact_dir(run_id, task_id))?;
     write_json_atomic(&artifact_contract_meta_path(run_id, task_id), &meta)
 }
+
 pub fn load_artifact_contract_meta(run_id: &str, task_id: &str) -> Option<ArtifactContractMeta> {
     let path = artifact_contract_meta_path(run_id, task_id);
     let raw = fs::read_to_string(path).ok()?;
     serde_json::from_str(&raw).ok()
 }
+
+#[allow(unused_imports)]
+use crate::config;
 #[allow(unused_imports)]
 use crate::data::ChatSession;
+#[allow(unused_imports)]
+use crate::memory;
+#[allow(unused_imports)]
+use crate::model::ModelProvider;
+#[allow(unused_imports)]
+use crate::provider_bridge::{
+    autonomous_provider_overrides, call_provider_cli_stream_with_overrides,
+};
+#[allow(unused_imports)]
+use crate::{
+    AutonomousExecutionEnvironment, AutonomousWorkflowMode, ReviewFixMode, ReviewScope, TurnPolicy,
+};
 #[allow(unused_imports)]
 use anyhow::{Context, Result};
 #[allow(unused_imports)]
@@ -65,6 +86,7 @@ use std::thread;
 use std::time::Duration;
 #[allow(unused_imports)]
 use uuid::Uuid;
+
 pub fn workspace_relative_path(root: &Path, path: &str) -> Option<String> {
     let candidate = Path::new(path.trim());
     let relative = if candidate.is_absolute() {
@@ -74,6 +96,7 @@ pub fn workspace_relative_path(root: &Path, path: &str) -> Option<String> {
     };
     Some(relative.to_string_lossy().trim_matches('/').to_string())
 }
+
 pub fn scope_allows_relative_path(scope: &str, relative_path: &str) -> bool {
     let normalized_scope = normalize_scope(scope);
     if let Some(expanded) = expand_braces(&normalized_scope) {
@@ -83,6 +106,7 @@ pub fn scope_allows_relative_path(scope: &str, relative_path: &str) -> bool {
     }
     scope_allows_relative_path_inner(&normalized_scope, relative_path)
 }
+
 pub fn scope_allows_relative_path_inner(normalized_scope: &str, relative_path: &str) -> bool {
     let normalized_path = normalize_scope(relative_path);
     normalized_scope == "."
@@ -93,6 +117,7 @@ pub fn scope_allows_relative_path_inner(normalized_scope: &str, relative_path: &
             .map(|prefix| normalized_path.starts_with(prefix.trim_matches('/')))
             .unwrap_or(false)
 }
+
 pub fn expand_braces(scope: &str) -> Option<Vec<String>> {
     let open = scope.find('{')?;
     let close = scope[open..].find('}').map(|i| i + open)?;
@@ -105,6 +130,7 @@ pub fn expand_braces(scope: &str) -> Option<Vec<String>> {
             .collect(),
     )
 }
+
 pub fn changed_file_exists(root: &Path, changed_file: &str) -> bool {
     let candidate = if Path::new(changed_file).is_absolute() {
         PathBuf::from(changed_file)
@@ -113,6 +139,7 @@ pub fn changed_file_exists(root: &Path, changed_file: &str) -> bool {
     };
     candidate.is_file()
 }
+
 pub fn snapshot_declared_write_scope(task: &CoordinationTask) -> WriteScopeSnapshot {
     WriteScopeSnapshot {
         file_hashes: collect_declared_write_scope_file_contents(task)
@@ -121,6 +148,7 @@ pub fn snapshot_declared_write_scope(task: &CoordinationTask) -> WriteScopeSnaps
             .collect(),
     }
 }
+
 pub fn capture_materialized_files_from_snapshot(
     task: &CoordinationTask,
     snapshot: &WriteScopeSnapshot,
@@ -136,6 +164,42 @@ pub fn capture_materialized_files_from_snapshot(
         })
         .collect()
 }
+
+pub fn capture_artifact_materialized_files(
+    task: &CoordinationTask,
+    artifact: &TaskArtifact,
+) -> Vec<MaterializedArtifactFile> {
+    if !task_mutates_workspace(task) {
+        return Vec::new();
+    }
+
+    if artifact.report.changed_files.is_empty() {
+        return collect_declared_write_scope_file_contents(task)
+            .into_iter()
+            .map(|(path, content)| MaterializedArtifactFile { path, content })
+            .collect();
+    }
+
+    let materialization_root = task_runsc_materialization_root(task);
+    artifact
+        .report
+        .changed_files
+        .iter()
+        .filter_map(|changed_file| {
+            let candidate = if Path::new(changed_file).is_absolute() {
+                PathBuf::from(changed_file)
+            } else {
+                materialization_root.join(changed_file)
+            };
+            let content = fs::read_to_string(&candidate).ok()?;
+            Some(MaterializedArtifactFile {
+                path: normalize_scope(changed_file),
+                content,
+            })
+        })
+        .collect()
+}
+
 pub fn collect_declared_write_scope_file_contents(
     task: &CoordinationTask,
 ) -> BTreeMap<String, String> {
@@ -146,6 +210,7 @@ pub fn collect_declared_write_scope_file_contents(
     let root = task_runsc_materialization_root(task);
     collect_write_scope_file_contents(&root, &task.write_scope)
 }
+
 pub fn collect_write_scope_file_contents(
     root: &Path,
     write_scope: &[String],
@@ -160,6 +225,7 @@ pub fn collect_write_scope_file_contents(
     }
     files
 }
+
 fn collect_scope_file_contents(root: &Path, scope: &str, files: &mut BTreeMap<String, String>) {
     if let Some(expanded) = expand_braces(scope) {
         for entry in expanded {
@@ -191,6 +257,7 @@ fn collect_scope_file_contents(root: &Path, scope: &str, files: &mut BTreeMap<St
         insert_materialized_file(root, &candidate, files);
     }
 }
+
 fn collect_tree_file_contents(root: &Path, candidate: &Path, files: &mut BTreeMap<String, String>) {
     let Ok(metadata) = fs::metadata(candidate) else {
         return;
@@ -218,6 +285,7 @@ fn collect_tree_file_contents(root: &Path, candidate: &Path, files: &mut BTreeMa
         }
     }
 }
+
 fn insert_materialized_file(root: &Path, candidate: &Path, files: &mut BTreeMap<String, String>) {
     let Ok(content) = fs::read_to_string(candidate) else {
         return;
@@ -231,6 +299,7 @@ fn insert_materialized_file(root: &Path, candidate: &Path, files: &mut BTreeMap<
     }
     files.insert(path, content);
 }
+
 fn hash_materialized_content(content: &str) -> u64 {
     use std::hash::{Hash, Hasher};
 
@@ -238,6 +307,7 @@ fn hash_materialized_content(content: &str) -> u64 {
     content.hash(&mut hasher);
     hasher.finish()
 }
+
 pub fn persist_artifact_materialized_files(
     run_id: &str,
     task_id: &str,
@@ -250,6 +320,7 @@ pub fn persist_artifact_materialized_files(
     }
     write_json_atomic(&path, &files.to_vec())
 }
+
 pub fn load_artifact_materialized_files(
     run_id: &str,
     task_id: &str,
@@ -260,6 +331,7 @@ pub fn load_artifact_materialized_files(
     };
     serde_json::from_str(&raw).unwrap_or_default()
 }
+
 pub fn changed_file_matches_output_path(changed_file: &str, output_path: &str) -> bool {
     let normalized_changed = normalize_scope(changed_file);
     let normalized_output = normalize_scope(output_path);
@@ -271,6 +343,7 @@ pub fn changed_file_matches_output_path(changed_file: &str, output_path: &str) -
         .zip(prompt_track_identity(&normalized_output))
         .is_some_and(|(left, right)| left == right)
 }
+
 fn prompt_track_identity(path: &str) -> Option<String> {
     let normalized = normalize_scope(path);
     let path = Path::new(&normalized);
@@ -288,6 +361,7 @@ fn prompt_track_identity(path: &str) -> Option<String> {
     }
     Some(format!("{prefix}-{track}"))
 }
+
 pub fn make_task_session(task: &CoordinationTask) -> ChatSession {
     ChatSession {
         id: task.task_id.clone(),

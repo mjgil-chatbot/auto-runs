@@ -1,4 +1,6 @@
 #[allow(unused_imports)]
+use crate::AutonomousWorkflowMode;
+#[allow(unused_imports)]
 use anyhow::{Context, Result};
 #[allow(unused_imports)]
 use chrono::{DateTime, Utc};
@@ -33,6 +35,10 @@ mod claims_completion;
 mod claims_scan;
 use super::*;
 use claims_scan::load_claim_from_entry;
+pub use claims_scan::{
+    collect_claim_worker_pids_for_stop, count_active_claims, has_conflicting_write_scope,
+    has_conflicting_write_scope_batched, reap_stale_claim_files,
+};
 pub fn write_presence(input: PresenceInput) -> Result<AgentPresence> {
     fs::create_dir_all(presence_dir())?;
     let presence = AgentPresence {
@@ -59,6 +65,86 @@ fn snapshot_lightweight_task_doc_before_write(
     let _ = task;
     // Generated lightweight workers no longer own task-list edits, so there is
     // no task-doc snapshot rail to maintain here.
+    Ok(())
+}
+pub fn persist_design_consensus_draft_doc_copy(
+    task: &CoordinationTask,
+    artifact: &TaskArtifact,
+) -> Result<()> {
+    if task.kind != CoordinationTaskKind::DraftDesignDoc {
+        return Ok(());
+    }
+
+    let Some(provider) = task.assigned_provider.as_deref() else {
+        return Ok(());
+    };
+    let run = load_run(&task.run_id)?;
+    if run.workflow_mode != AutonomousWorkflowMode::DesignConsensus || !run.allow_write_tasks {
+        return Ok(());
+    }
+    if artifact.body.trim().is_empty() {
+        anyhow::bail!(
+            "draft design artifact for task {} did not contain markdown to persist",
+            task.task_id
+        );
+    }
+
+    let draft_doc_path = provider_draft_design_doc_path(&run, provider);
+    let absolute_path = workspace_path_for_run(&run, &draft_doc_path);
+    if let Some(parent) = absolute_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&absolute_path, &artifact.body).with_context(|| {
+        format!(
+            "failed to write provider draft design doc extracted from task artifact to `{}`",
+            draft_doc_path
+        )
+    })?;
+    Ok(())
+}
+pub(crate) fn sync_run_summary_after_task_update(
+    run_id: &str,
+    updated_at: DateTime<Utc>,
+) -> Result<()> {
+    let mut run = load_run(run_id)?;
+    let tasks = load_tasks(run_id)?;
+    let completion_gate_issues = if tasks
+        .iter()
+        .all(|task| task.status == CoordinationTaskStatus::Completed)
+    {
+        run_completion_gate_issues(&run, &tasks)?
+    } else {
+        Vec::new()
+    };
+    run.status = merge_derived_run_status(
+        &run.status,
+        derive_run_status(&tasks, &completion_gate_issues),
+    );
+    run.updated_at = updated_at;
+    write_json_atomic(&run_path(run_id), &run)?;
+    index_run(&run);
+    refresh_lightweight_status_projection(run_id)?;
+    if run.status == CoordinationRunStatus::Failed {
+        match maybe_auto_fix_failed_run(run_id, &mut run) {
+            Ok(true) => {
+                let _ = restart_failed_tasks_with_mode(run_id, RestartMode::AutoSelfHeal)?;
+            }
+            Ok(false) => {}
+            Err(err) => {
+                warn!(
+                    run_id = %run.run_id,
+                    error = %err,
+                    "automatic self-heal failed while syncing run summary"
+                );
+                let _ = append_event(
+                    run_id,
+                    "run_auto_fix_restart_failed",
+                    None,
+                    &format!("Automatic self-heal failed before restart: {err}"),
+                );
+            }
+        }
+    }
     Ok(())
 }
 pub fn lightweight_provider_unavailable_message(
@@ -145,6 +231,63 @@ fn semantic_repair_prompt(prompt: &str, failure_message: &str) -> String {
         marker = SEMANTIC_REPAIR_CONTEXT_MARKER,
     )
 }
+fn requeue_task_for_semantic_repair(
+    run_id: &str,
+    task: &mut CoordinationTask,
+    provider_name: &str,
+    failure_kind: TaskFailureKind,
+    message: &str,
+) -> Result<bool> {
+    if !load_run(run_id)?.auto_retry_failed_tasks {
+        return Ok(false);
+    }
+    if is_pre_execution_rail_failure(message) {
+        return Ok(false);
+    }
+    if !matches!(
+        failure_kind,
+        TaskFailureKind::Acceptance
+            | TaskFailureKind::Unknown
+            | TaskFailureKind::BlockedWrite
+            | TaskFailureKind::WorkspaceMutation
+    ) {
+        return Ok(false);
+    }
+    if !is_provider_backed(task) {
+        return Ok(false);
+    }
+    if task.attempt_count >= task.max_attempts.max(1) {
+        return Ok(false);
+    }
+    let now = Utc::now();
+    if task.max_attempts < AUTO_REPAIR_MAX_ATTEMPTS {
+        task.max_attempts = (task.max_attempts + 1).min(AUTO_REPAIR_MAX_ATTEMPTS);
+    }
+    task.prompt = semantic_repair_prompt(&task.prompt, message);
+    task.status = CoordinationTaskStatus::Queued;
+    task.claimed_by = None;
+    task.failure_kind = None;
+    task.recovery_action = None;
+    task.artifact_summary = Some(message.to_string());
+    task.updated_at = now;
+    write_json_atomic(&task_path(run_id, &task.task_id), task)?;
+    index_task(task);
+    let _ = fs::remove_file(claim_path(run_id, &task.task_id));
+    append_event_with_provider(
+        run_id,
+        "task_repair_scheduled",
+        Some(&task.task_id),
+        Some(provider_name),
+        task.task_category,
+        task.provider_hint.as_deref(),
+        &format!(
+            "Scheduled automatic repair retry for {} after semantic failure. {}",
+            task.title, message
+        ),
+    )?;
+    sync_run_summary_after_task_update(run_id, now)?;
+    Ok(true)
+}
 fn format_failure_attempt_suffix(current_attempt: u32, max_attempts: u32) -> String {
     if current_attempt <= 1 || max_attempts <= 1 {
         String::new()
@@ -194,6 +337,53 @@ pub fn adopt_claim_for_worker(
     adopt_claim_in_memory(&mut claim, &mut task, launcher_pid, worker_pid, now)?;
     write_json_atomic(&claim_path(run_id, task_id), &claim)?;
     write_json_atomic(&task_path(run_id, task_id), &task)?;
+    Ok(())
+}
+pub fn expire_stale_claims(run_id: &str) -> Result<()> {
+    let entries = match fs::read_dir(claims_dir(run_id)) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()),
+    };
+    let now = Utc::now();
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let Some(claim) = load_claim_from_entry(&entry) else {
+            continue;
+        };
+        if claim_heartbeat_stale_at(&claim) >= now {
+            continue;
+        }
+
+        let mut task = load_task(run_id, &claim.task_id)?;
+        if matches!(
+            task.status,
+            CoordinationTaskStatus::Running | CoordinationTaskStatus::Claiming
+        ) {
+            task.attempt_count = task.attempt_count.saturating_sub(1);
+            task.status = stale_claim_recovery_status(&task);
+            task.claimed_by = None;
+            task.artifact_summary = None;
+            task.failure_kind = Some(TaskFailureKind::ClaimLost);
+            task.recovery_action = Some(TaskRecoveryAction::ReconcileState);
+            task.updated_at = now;
+            write_json_atomic(&task_path(run_id, &task.task_id), &task)?;
+            index_task(&task);
+            append_event(
+                run_id,
+                "task_requeued",
+                Some(&claim.task_id),
+                &format!(
+                    "Claim heartbeat went stale for instance PID {}. Claim progress: {}",
+                    claim.instance_pid,
+                    claim_lifecycle_summary(&claim)
+                ),
+            )?;
+            sync_run_summary_after_task_update(run_id, task.updated_at)?;
+        }
+        let _ = fs::remove_file(entry.path());
+    }
     Ok(())
 }
 #[cfg(unix)]

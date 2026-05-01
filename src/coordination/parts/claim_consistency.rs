@@ -1,14 +1,18 @@
 use super::*;
 use fs2::FileExt;
+
 pub(crate) struct ClaimRefreshLock(fs::File);
+
 impl Drop for ClaimRefreshLock {
     fn drop(&mut self) {
         let _ = self.0.unlock();
     }
 }
+
 fn claim_refresh_lock_path(run_id: &str) -> PathBuf {
     run_dir(run_id).join("claim-refresh.lock")
 }
+
 pub(crate) fn acquire_claim_refresh_lock(run_id: &str) -> Result<ClaimRefreshLock> {
     let path = claim_refresh_lock_path(run_id);
     let parent = path
@@ -25,6 +29,7 @@ pub(crate) fn acquire_claim_refresh_lock(run_id: &str) -> Result<ClaimRefreshLoc
         .with_context(|| format!("failed to lock {}", path.display()))?;
     Ok(ClaimRefreshLock(file))
 }
+
 fn load_claims(run_id: &str) -> Vec<TaskClaim> {
     let entries = match fs::read_dir(claims_dir(run_id)) {
         Ok(entries) => entries,
@@ -38,6 +43,7 @@ fn load_claims(run_id: &str) -> Vec<TaskClaim> {
         .filter_map(|raw| serde_json::from_str::<TaskClaim>(&raw).ok())
         .collect()
 }
+
 fn missing_claim_details(task: &CoordinationTask) -> String {
     let owner = task
         .claimed_by
@@ -49,9 +55,11 @@ fn missing_claim_details(task: &CoordinationTask) -> String {
         task.max_attempts.max(1)
     )
 }
+
 fn active_task_claim_requires_reconciliation(task: &CoordinationTask, claim: &TaskClaim) -> bool {
     task.claimed_by != Some(claim.instance_pid)
 }
+
 fn load_current_active_task_for_claim_repair(
     run_id: &str,
     task_id: &str,
@@ -63,20 +71,24 @@ fn load_current_active_task_for_claim_repair(
     )
     .then_some(task))
 }
+
 #[cfg(unix)]
 fn process_is_alive_for_claim_repair(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
+
 #[cfg(not(unix))]
 fn process_is_alive_for_claim_repair(_pid: u32) -> bool {
     true
 }
+
 fn should_defer_missing_claim_repair(task: &CoordinationTask) -> bool {
     let Some(owner_pid) = task.claimed_by else {
         return false;
     };
     process_is_alive_for_claim_repair(owner_pid)
 }
+
 pub(crate) fn reconcile_missing_claim_for_active_task_from_snapshot(
     run_id: &str,
     task: &CoordinationTask,
@@ -138,6 +150,74 @@ pub(crate) fn reconcile_missing_claim_for_active_task_from_snapshot(
     )?;
     Ok(true)
 }
+
+pub fn reconcile_tasks_missing_claims(run_id: &str) -> Result<bool> {
+    let tasks = load_tasks(run_id)?;
+    let now = Utc::now();
+    let mut changed = false;
+
+    for task in &tasks {
+        if !matches!(
+            task.status,
+            CoordinationTaskStatus::Running | CoordinationTaskStatus::Claiming
+        ) {
+            continue;
+        }
+        let Some(mut current_task) =
+            load_current_active_task_for_claim_repair(run_id, &task.task_id)?
+        else {
+            continue;
+        };
+
+        let claim = match load_claim(run_id, &task.task_id) {
+            Ok(claim) => {
+                if active_task_claim_requires_reconciliation(&current_task, &claim) {
+                    let provider = current_task.assigned_provider.clone();
+                    current_task.claimed_by = Some(claim.instance_pid);
+                    current_task.updated_at = now;
+                    write_json_atomic(&task_path(run_id, &current_task.task_id), &current_task)?;
+                    index_task(&current_task);
+                    append_event_with_provider(
+                        run_id,
+                        "task_claim_reconciled",
+                        Some(&current_task.task_id),
+                        provider.as_deref(),
+                        current_task.task_category,
+                        current_task.provider_hint.as_deref(),
+                        &with_driver_context(
+                            format!(
+                                "Reconciled active task {} back to claim owner PID {}.",
+                                current_task.title, claim.instance_pid
+                            ),
+                            std::process::id(),
+                        ),
+                    )?;
+                    changed = true;
+                }
+                Some(claim)
+            }
+            Err(_) => None,
+        };
+        if claim.is_some() {
+            continue;
+        }
+
+        // Skip repair if expire_stale_claims already handled this task in the same
+        // iteration — it sets failure_kind=ClaimLost and transitions to Queued.
+        // Repairing again would redundantly re-queue it on every drive loop.
+        if current_task.failure_kind == Some(TaskFailureKind::ClaimLost) {
+            continue;
+        }
+
+        changed |= reconcile_missing_claim_for_active_task_from_snapshot(run_id, task, now)?;
+    }
+
+    if changed {
+        sync_run_summary_after_task_update(run_id, now)?;
+    }
+    Ok(changed)
+}
+
 pub fn reconcile_orphaned_claim_files(run_id: &str) -> Result<bool> {
     let mut changed = false;
 
@@ -201,4 +281,12 @@ pub fn reconcile_orphaned_claim_files(run_id: &str) -> Result<bool> {
     }
 
     Ok(changed)
+}
+
+pub fn refresh_claim_state(run_id: &str) -> Result<bool> {
+    let _lock = acquire_claim_refresh_lock(run_id)?;
+    expire_stale_claims(run_id)?;
+    let missing_claims_changed = reconcile_tasks_missing_claims(run_id)?;
+    let orphaned_claims_changed = reconcile_orphaned_claim_files(run_id)?;
+    Ok(missing_claims_changed || orphaned_claims_changed)
 }
