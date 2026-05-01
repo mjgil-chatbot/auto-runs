@@ -173,6 +173,32 @@ pub fn is_provider_on_cooldown<'a>(
     let cooldown = run.provider_cooldowns.get(normalized.as_str())?;
     (cooldown.unavailable_until > now).then_some(cooldown)
 }
+pub fn select_fallback_provider(
+    run: &CoordinationRun,
+    unavailable_provider: &str,
+    now: DateTime<Utc>,
+) -> Option<String> {
+    let registry = load_capability_registry();
+    let mut candidates = Vec::new();
+
+    if let Some(profile) = find_provider_profile(&registry, unavailable_provider) {
+        for candidate_id in &profile.fallback_chain {
+            if is_provider_on_cooldown(run, candidate_id, now).is_none() {
+                push_unique_provider(&mut candidates, candidate_id);
+            }
+        }
+    }
+
+    for profile in &registry.providers {
+        if profile.provider_id != unavailable_provider
+            && is_provider_on_cooldown(run, &profile.provider_id, now).is_none()
+        {
+            push_unique_provider(&mut candidates, &profile.provider_id);
+        }
+    }
+
+    candidates.into_iter().next()
+}
 /// Validate run input at the API boundary to catch configuration errors early.
 pub fn validate_run_input(input: &UpsertRunInput) -> Result<()> {
     if input.goal.trim().is_empty() {
@@ -223,6 +249,80 @@ pub fn validate_run_input(input: &UpsertRunInput) -> Result<()> {
     validate_github_branch_fix_workspace_input(input)?;
     validate_perf_workspace_input(input)?;
     Ok(())
+}
+#[cfg(test)]
+pub fn resolve_provider_for_task_claim(
+    run: &CoordinationRun,
+    assigned_provider: Option<&str>,
+    default_provider: &str,
+    now: DateTime<Utc>,
+) -> Option<String> {
+    resolve_provider_for_task_claim_with_category(
+        run,
+        assigned_provider,
+        default_provider,
+        None,
+        now,
+    )
+}
+pub fn resolve_provider_for_task_claim_with_category(
+    run: &CoordinationRun,
+    assigned_provider: Option<&str>,
+    default_provider: &str,
+    task_category: Option<&TaskCategory>,
+    now: DateTime<Utc>,
+) -> Option<String> {
+    let requested = assigned_provider.unwrap_or(default_provider);
+    if let Some(category) = task_category {
+        if provider_supports_category(&load_capability_registry(), requested, category) {
+            if is_provider_on_cooldown(run, requested, now).is_none() {
+                return Some(requested.to_string());
+            }
+            if let Some(fallback) = select_category_fallback_provider(run, requested, category, now)
+            {
+                return Some(fallback);
+            }
+        }
+        return ordered_available_providers_for_category(run, category, now)
+            .into_iter()
+            .next();
+    }
+
+    if is_provider_on_cooldown(run, requested, now).is_none() {
+        return Some(requested.to_string());
+    }
+
+    select_fallback_provider(run, requested, now)
+}
+/// Select a fallback provider that supports a specific task category,
+/// using the registry's fallback chain and respecting cooldowns.
+pub fn select_category_fallback_provider(
+    run: &CoordinationRun,
+    unavailable_provider: &str,
+    category: &TaskCategory,
+    now: DateTime<Utc>,
+) -> Option<String> {
+    let registry = load_capability_registry();
+    let mut candidates = Vec::new();
+
+    if let Some(profile) = find_provider_profile(&registry, unavailable_provider) {
+        for candidate_id in &profile.fallback_chain {
+            if is_provider_on_cooldown(run, candidate_id, now).is_some() {
+                continue;
+            }
+            if provider_supports_category(&registry, candidate_id, category) {
+                push_unique_provider(&mut candidates, candidate_id);
+            }
+        }
+    }
+
+    for provider_id in ordered_available_providers_for_category(run, category, now) {
+        if provider_id != unavailable_provider {
+            push_unique_provider(&mut candidates, &provider_id);
+        }
+    }
+
+    candidates.into_iter().next()
 }
 pub fn stale_claim_recovery_status(task: &CoordinationTask) -> CoordinationTaskStatus {
     let _ = task;

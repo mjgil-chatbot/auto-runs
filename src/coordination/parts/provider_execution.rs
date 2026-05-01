@@ -1,5 +1,9 @@
 use super::*;
 #[allow(unused_imports)]
+use crate::model::ModelProvider;
+#[allow(unused_imports)]
+use crate::provider_bridge::call_provider_cli_stream_with_overrides;
+#[allow(unused_imports)]
 use crate::AutonomousExecutionEnvironment;
 #[allow(unused_imports)]
 use crate::AutonomousWorkflowMode;
@@ -98,6 +102,87 @@ pub(crate) fn append_runsc_ready_event(
             include_summary
         ),
     )
+}
+fn run_validation_reasks(
+    task: &CoordinationTask,
+    provider_name: &str,
+    base_query: &str,
+    initial_response: String,
+    contract: &TaskContract,
+    provider: crate::model::ModelProvider,
+    overrides: &crate::provider_bridge::ProviderRequestOverrides,
+    provider_stop_signal: Arc<AtomicBool>,
+    user_stop_signal: Arc<AtomicBool>,
+) -> Result<String> {
+    let max_reasks = contract.max_validation_reasks as u32;
+    if max_reasks == 0 {
+        return Ok(initial_response);
+    }
+
+    let mut current = initial_response;
+    let mut attempt: u32 = 0;
+    while attempt < max_reasks {
+        let errors = collect_typed_validation_errors(task, contract, &current);
+        if errors.is_empty() {
+            return Ok(current);
+        }
+
+        attempt += 1;
+        let reask = build_reask_from_errors(contract, &errors);
+        warn!(
+            run_id = %task.run_id,
+            task_id = %task.task_id,
+            provider = %provider_name,
+            attempt = attempt,
+            errors = ?errors,
+            "contract validation errors for reask"
+        );
+        if let Err(err) =
+            append_reask_event(&task.run_id, &task.task_id, provider_name, &reask, attempt)
+        {
+            warn!(
+                run_id = %task.run_id,
+                task_id = %task.task_id,
+                error = %err,
+                "failed to append reask event"
+            );
+        }
+
+        let reask_query = format!("{}\n\n{}", base_query, reask.message);
+        let session = Some(make_task_session(task));
+        let (tx2, rx2) = mpsc::channel();
+        let call_result = call_provider_cli_stream_with_overrides(
+            provider,
+            &reask_query,
+            Some(TASK_SYSTEM_PROMPT),
+            None,
+            session,
+            Some(overrides),
+            tx2,
+            Arc::clone(&provider_stop_signal),
+        );
+        let next_response = collect_stream_response(rx2);
+        if user_stop_signal.load(Ordering::Acquire) {
+            return Ok(current);
+        }
+        if call_result.is_err() {
+            return Ok(current);
+        }
+        current = next_response;
+    }
+
+    let final_errors = collect_typed_validation_errors(task, contract, &current);
+    if !final_errors.is_empty() {
+        warn!(
+            run_id = %task.run_id,
+            task_id = %task.task_id,
+            attempts = attempt,
+            "reask attempts exhausted; recording terminal failure report"
+        );
+        let report = terminal_reask_failure_report(&current, attempt);
+        return Ok(serde_json::to_string(&report)?);
+    }
+    Ok(current)
 }
 fn collect_typed_validation_errors(
     task: &CoordinationTask,

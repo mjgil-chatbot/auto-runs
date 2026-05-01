@@ -265,6 +265,35 @@ pub struct AgentProfile {
     #[serde(default)]
     pub tool_access: ToolAccess,
 }
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct ProviderCapabilityProfile {
+    pub provider_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_override: Option<String>,
+    #[serde(default)]
+    pub prompt_family: PromptFamily,
+    #[serde(default)]
+    pub supported_categories: Vec<TaskCategory>,
+    #[serde(default)]
+    pub preferred_categories: Vec<TaskCategory>,
+    #[serde(default)]
+    pub fallback_chain: Vec<String>,
+    #[serde(default)]
+    pub cooldown_eligible: bool,
+    #[serde(default)]
+    pub max_concurrency: usize,
+    #[serde(default)]
+    pub cost_tier: CostTier,
+    #[serde(default)]
+    pub structured_output_mode: super::structured_generation::StructuredOutputMode,
+    #[serde(default)]
+    pub notes: String,
+}
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct ProviderCapabilityRegistry {
+    #[serde(default)]
+    pub providers: Vec<ProviderCapabilityProfile>,
+}
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct TaskExecutionReport {
     #[serde(default)]

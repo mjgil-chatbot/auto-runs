@@ -51,6 +51,60 @@ fn append_reconcile_issue(
 fn short_commit(commit: &str) -> &str {
     commit.get(..12).unwrap_or(commit)
 }
+pub(crate) fn load_incomplete_mutation_batches(
+    run_id: &str,
+    processed: &BTreeSet<String>,
+) -> Result<Vec<CoordinationMutationBatch>> {
+    let entries = match fs::read_dir(mutation_batches_dir(run_id)) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err.into()),
+    };
+    let now = Utc::now();
+    let mut batches = Vec::new();
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let raw = match fs::read_to_string(entry.path()) {
+            Ok(raw) => raw,
+            Err(_) => continue,
+        };
+        let Ok(batch) = serde_json::from_str::<CoordinationMutationBatch>(&raw) else {
+            continue;
+        };
+        // Skip batches with future created_at (clock skew / corrupted state) — these
+        // indicate a previous crash left the batch file in an inconsistent state and
+        // should not block forward progress. A properly created batch will have
+        // created_at <= now, so a batch with created_at > now is never valid.
+        if batch.created_at > now {
+            complete_mutation_batch(&mut batch.clone())?;
+            append_event(
+                run_id,
+                "mutation_batch_replay_skipped",
+                batch.task_id.as_deref(),
+                &format!(
+                    "Skipped mutation batch {:?} with future created_at {} — marked complete to unblock progress.",
+                    batch.kind,
+                    batch.created_at.to_rfc3339()
+                ),
+            )?;
+            continue;
+        }
+        // Defensive: also skip if completed_at is in the future (shouldn't happen
+        // with Utc::now() but guards against manual file tampering)
+        if let Some(completed) = batch.completed_at {
+            if completed > now {
+                continue;
+            }
+        }
+        if batch.completed_at.is_none() && !processed.contains(&batch.batch_id) {
+            batches.push(batch);
+        }
+    }
+    batches.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+    Ok(batches)
+}
 fn reconcile_dependency_generations(run_id: &str, tasks: &mut [CoordinationTask]) -> Result<bool> {
     let completed = completed_task_generations(tasks);
     let mut changed = false;

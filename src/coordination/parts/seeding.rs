@@ -2,6 +2,8 @@ use super::*;
 #[allow(unused_imports)]
 use crate::config;
 #[allow(unused_imports)]
+use crate::model::ModelProvider;
+#[allow(unused_imports)]
 use crate::AutonomousExecutionEnvironment;
 #[allow(unused_imports)]
 use crate::ReviewScope;
