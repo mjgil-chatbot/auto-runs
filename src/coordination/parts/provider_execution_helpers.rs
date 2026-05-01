@@ -1,6 +1,20 @@
 use super::*;
 #[allow(unused_imports)]
+use crate::config;
+#[allow(unused_imports)]
+use crate::data::ChatSession;
+#[allow(unused_imports)]
+use crate::memory;
+#[allow(unused_imports)]
 use crate::model::ModelProvider;
+#[allow(unused_imports)]
+use crate::provider_bridge::{
+    autonomous_provider_overrides, call_provider_cli_stream_with_overrides,
+};
+#[allow(unused_imports)]
+use crate::{
+    AutonomousExecutionEnvironment, AutonomousWorkflowMode, ReviewFixMode, ReviewScope, TurnPolicy,
+};
 #[allow(unused_imports)]
 use anyhow::{Context, Result};
 #[allow(unused_imports)]
@@ -30,6 +44,7 @@ use std::thread;
 use std::time::Duration;
 #[allow(unused_imports)]
 use uuid::Uuid;
+
 pub(crate) fn resolve_autonomous_provider(provider_name: &str) -> Result<ModelProvider> {
     match normalize_provider_name(Some(provider_name)).as_deref() {
         Some("claude") => Ok(ModelProvider::Claude),
@@ -41,18 +56,22 @@ pub(crate) fn resolve_autonomous_provider(provider_name: &str) -> Result<ModelPr
         _ => anyhow::bail!("unsupported provider {}", provider_name.trim()),
     }
 }
+
 pub const QWEN_PROVIDER_TASK_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
 fn provider_timeout_cap(provider_name: &str) -> Option<Duration> {
     match provider_name {
         "qwen" => Some(QWEN_PROVIDER_TASK_TIMEOUT),
         _ => None,
     }
 }
+
 fn estimated_task_timeout(task: &CoordinationTask) -> Duration {
     Duration::from_secs(
         (normalize_task_estimated_minutes(task.estimated_minutes, &task.kind) as u64) * 60,
     )
 }
+
 pub fn provider_task_timeout(provider_name: &str, task: &CoordinationTask) -> Option<Duration> {
     let estimate_timeout = estimated_task_timeout(task);
     match provider_timeout_cap(provider_name) {
@@ -60,6 +79,7 @@ pub fn provider_task_timeout(provider_name: &str, task: &CoordinationTask) -> Op
         None => Some(estimate_timeout),
     }
 }
+
 pub fn provider_timeout_failure(provider_name: &str, timeout: Duration) -> String {
     format!(
         "{} task timed out after {}.",
@@ -67,6 +87,14 @@ pub fn provider_timeout_failure(provider_name: &str, timeout: Duration) -> Strin
         format_duration(timeout)
     )
 }
+
+pub fn provider_timeout_prefix(provider_name: &str) -> String {
+    format!(
+        "{} task timed out after",
+        provider_display_name(provider_name)
+    )
+}
+
 fn provider_display_name(provider_name: &str) -> &str {
     match provider_name {
         "claude" => "Claude",
@@ -80,6 +108,7 @@ fn provider_display_name(provider_name: &str) -> &str {
         other => other,
     }
 }
+
 fn format_duration(duration: Duration) -> String {
     let secs = duration.as_secs();
     if secs % 60 == 0 {
@@ -89,6 +118,7 @@ fn format_duration(duration: Duration) -> String {
         format!("{} second{}", secs, if secs == 1 { "" } else { "s" })
     }
 }
+
 pub fn collect_stream_response(rx: mpsc::Receiver<crate::stream::StreamMessage>) -> String {
     let mut last_response = String::new();
     let mut last_non_empty_response = String::new();
@@ -110,6 +140,7 @@ pub fn collect_stream_response(rx: mpsc::Receiver<crate::stream::StreamMessage>)
         last_response
     }
 }
+
 pub fn extract_provider_command_failure(response: &str) -> Option<&str> {
     let trimmed = response.trim();
     [
@@ -124,6 +155,7 @@ pub fn extract_provider_command_failure(response: &str) -> Option<&str> {
     .iter()
     .find_map(|prefix| trimmed.starts_with(prefix).then_some(trimmed))
 }
+
 pub fn extract_provider_cooldown(
     provider_name: &str,
     response: &str,
@@ -137,6 +169,7 @@ pub fn extract_provider_cooldown(
     }
     .or_else(|| extract_provider_auth_failure(&provider, response, now))
 }
+
 pub fn extract_gemini_cooldown(response: &str, now: DateTime<Utc>) -> Option<ProviderCooldown> {
     let lower = response.to_ascii_lowercase();
     let has_quota_signal = response.contains("TerminalQuotaError")
@@ -164,6 +197,7 @@ pub fn extract_gemini_cooldown(response: &str, now: DateTime<Utc>) -> Option<Pro
         reason: "Gemini API quota exhausted.".to_string(),
     })
 }
+
 pub fn extract_glm_cooldown(response: &str, now: DateTime<Utc>) -> Option<ProviderCooldown> {
     let lower = response.to_ascii_lowercase();
     let has_quota_signal = lower.contains("429")
@@ -189,6 +223,7 @@ pub fn extract_glm_cooldown(response: &str, now: DateTime<Utc>) -> Option<Provid
         reason: "GLM API quota exhausted.".to_string(),
     })
 }
+
 pub fn extract_provider_auth_failure(
     provider_name: &str,
     response: &str,
@@ -222,6 +257,7 @@ pub fn extract_provider_auth_failure(
         reason,
     })
 }
+
 pub fn extract_retry_delay_ms(response: &str) -> Option<i64> {
     let marker = "retryDelayMs:";
     let start = response.find(marker)? + marker.len();
@@ -239,6 +275,7 @@ pub fn extract_retry_delay_ms(response: &str) -> Option<i64> {
     }
     Some(millis as i64)
 }
+
 pub fn extract_quota_reset_delay(response: &str) -> Option<chrono::Duration> {
     let lower = response.to_ascii_lowercase();
     let marker = "reset after ";
@@ -250,6 +287,7 @@ pub fn extract_quota_reset_delay(response: &str) -> Option<chrono::Duration> {
         .collect();
     parse_compact_duration(&raw_duration)
 }
+
 pub fn extract_glm_reset_timestamp(response: &str) -> Option<DateTime<Utc>> {
     for marker in ["限额将在 ", "限额将在", "will reset at ", "reset at "] {
         let Some(pos) = response.find(marker) else {
@@ -277,6 +315,7 @@ pub fn extract_glm_reset_timestamp(response: &str) -> Option<DateTime<Utc>> {
     }
     None
 }
+
 pub fn parse_compact_duration(raw: &str) -> Option<chrono::Duration> {
     if raw.is_empty() {
         return None;
@@ -306,6 +345,7 @@ pub fn parse_compact_duration(raw: &str) -> Option<chrono::Duration> {
     }
     Some(chrono::Duration::seconds(total_seconds))
 }
+
 pub fn extract_retry_delay_duration(response: &str) -> Option<chrono::Duration> {
     let lower = response.to_ascii_lowercase();
     for marker in [
@@ -334,6 +374,7 @@ pub fn extract_retry_delay_duration(response: &str) -> Option<chrono::Duration> 
     }
     None
 }
+
 pub fn parse_retry_delay_duration(raw: &str) -> Option<chrono::Duration> {
     if raw.is_empty() {
         return None;

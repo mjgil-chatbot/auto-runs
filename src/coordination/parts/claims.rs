@@ -1,5 +1,19 @@
 #[allow(unused_imports)]
-use crate::AutonomousWorkflowMode;
+use crate::config;
+#[allow(unused_imports)]
+use crate::data::ChatSession;
+#[allow(unused_imports)]
+use crate::memory;
+#[allow(unused_imports)]
+use crate::model::ModelProvider;
+#[allow(unused_imports)]
+use crate::provider_bridge::{
+    autonomous_provider_overrides, call_provider_cli_stream_with_overrides,
+};
+#[allow(unused_imports)]
+use crate::{
+    AutonomousExecutionEnvironment, AutonomousWorkflowMode, ReviewFixMode, ReviewScope, TurnPolicy,
+};
 #[allow(unused_imports)]
 use anyhow::{Context, Result};
 #[allow(unused_imports)]
@@ -34,11 +48,13 @@ mod claims_completion;
 #[path = "claims_scan.rs"]
 mod claims_scan;
 use super::*;
+pub use claims_completion::{complete_task, complete_task_with_materialized_files};
 use claims_scan::load_claim_from_entry;
 pub use claims_scan::{
     collect_claim_worker_pids_for_stop, count_active_claims, has_conflicting_write_scope,
     has_conflicting_write_scope_batched, reap_stale_claim_files,
 };
+
 pub fn write_presence(input: PresenceInput) -> Result<AgentPresence> {
     fs::create_dir_all(presence_dir())?;
     let presence = AgentPresence {
@@ -52,6 +68,214 @@ pub fn write_presence(input: PresenceInput) -> Result<AgentPresence> {
     write_json_atomic(&presence_path(presence.instance_pid), &presence)?;
     Ok(presence)
 }
+
+pub fn claim_next_runnable_task(
+    run_id: &str,
+    instance_pid: u32,
+    provider: &str,
+) -> Result<Option<CoordinationTask>> {
+    claim_next_runnable_task_matching(run_id, instance_pid, provider, |_| true)
+}
+
+pub fn claim_next_runnable_provider_task(
+    run_id: &str,
+    instance_pid: u32,
+    provider: &str,
+) -> Result<Option<CoordinationTask>> {
+    claim_next_runnable_task_matching(run_id, instance_pid, provider, is_provider_backed)
+}
+
+fn claim_next_runnable_task_matching<F>(
+    run_id: &str,
+    instance_pid: u32,
+    provider: &str,
+    matches_task: F,
+) -> Result<Option<CoordinationTask>>
+where
+    F: Fn(&CoordinationTask) -> bool,
+{
+    let _claim_refresh_lock = acquire_claim_refresh_lock(run_id)?;
+    let _ = reconcile_run_state(run_id);
+    let now = Utc::now();
+    let mut run = load_run(run_id)?;
+    if has_open_interrupts(run_id) {
+        return Ok(None);
+    }
+    let mut tasks = load_tasks(run_id)?;
+    let completed = completed_task_generations(&tasks);
+    let run_changed = refresh_run_provider_cooldowns(&mut run, &tasks, now)?;
+    if run_changed {
+        run.updated_at = now;
+        write_json_atomic(&run_path(run_id), &run)?;
+    }
+    let tasks_by_id: BTreeMap<String, CoordinationTask> = tasks
+        .iter()
+        .map(|t| (t.task_id.clone(), t.clone()))
+        .collect();
+
+    for task in tasks.iter_mut() {
+        if task.status != CoordinationTaskStatus::Queued {
+            continue;
+        }
+        if !matches_task(task) {
+            continue;
+        }
+        if !task_dependencies_completed(task, &completed) {
+            task.status = CoordinationTaskStatus::Blocked;
+            task.updated_at = now;
+            write_json_atomic(&task_path(run_id, &task.task_id), task)?;
+            index_task(task);
+            continue;
+        }
+        let retry_scope_additions =
+            retry_scope_candidates_from_previous_scope_failure(run_id, task)?;
+        let mut effective_write_scope = task.write_scope.clone();
+        let retry_scope_expanded =
+            merge_retry_scope_entries(&mut effective_write_scope, retry_scope_additions);
+        if !lightweight_generated_write_claims_ignore_scope_conflicts(&run, task) {
+            if has_conflicting_write_scope_batched(
+                run_id,
+                &task.task_id,
+                &effective_write_scope,
+                &tasks_by_id,
+            )? {
+                continue;
+            }
+        }
+        if retry_scope_expanded {
+            task.write_scope = effective_write_scope;
+        }
+        if let Some(ref required_role) = task.required_role {
+            let instance_role = crate::sync::get_instance_role_by_pid(instance_pid);
+            if instance_role.as_ref() != Some(required_role) {
+                continue;
+            }
+        }
+
+        let requested_provider = task
+            .assigned_provider
+            .clone()
+            .unwrap_or_else(|| provider.to_string());
+        let claim_provider = if let Some(behavior) = LightweightWorkflowBehavior::for_run(&run) {
+            if let Some(claim_provider) = behavior.claim_provider(task, provider, now) {
+                claim_provider
+            } else if let Some(assigned_provider) = task.assigned_provider.clone() {
+                let cooldown = is_provider_on_cooldown(&run, &assigned_provider, now).cloned();
+                fail_lightweight_task_for_unavailable_provider(
+                    run_id,
+                    task,
+                    &assigned_provider,
+                    cooldown.as_ref(),
+                    "",
+                )?;
+                return Ok(None);
+            } else {
+                continue;
+            }
+        } else {
+            let Some(claim_provider) = resolve_provider_for_task_claim_with_category(
+                &run,
+                task.assigned_provider.as_deref(),
+                provider,
+                task.task_category.as_ref(),
+                now,
+            ) else {
+                continue;
+            };
+            claim_provider
+        };
+        let claim = TaskClaim {
+            run_id: run_id.to_string(),
+            task_id: task.task_id.clone(),
+            provider: claim_provider.clone(),
+            instance_pid,
+            launcher_pid: Some(instance_pid),
+            lifecycle_phase: ClaimLifecyclePhase::Claimed,
+            worker_pid: None,
+            claimed_at: now,
+            worker_spawned_at: None,
+            worker_adopted_at: None,
+            execution_started_at: None,
+            worker_exited_at: None,
+            worker_exit_detail: None,
+            last_heartbeat_at: now,
+        };
+
+        if !create_claim_file(&claim)? {
+            continue;
+        }
+        snapshot_lightweight_task_doc_before_write(run_id, &run, task)?;
+
+        task.attempt_count = task.attempt_count.saturating_add(1);
+        task.status = CoordinationTaskStatus::Running;
+        task.assigned_provider = Some(claim_provider.clone());
+        task.failure_kind = None;
+        task.recovery_action = None;
+        if requested_provider != claim_provider && task.provider_hint.is_none() {
+            task.provider_hint = Some(requested_provider.clone());
+        }
+        task.claimed_by = Some(instance_pid);
+        task.updated_at = now;
+        write_json_atomic(&task_path(run_id, &task.task_id), task)?;
+        index_task(task);
+        if retry_scope_expanded {
+            append_event_with_provider(
+                run_id,
+                "task_scope_expanded",
+                Some(&task.task_id),
+                Some(&claim_provider),
+                task.task_category,
+                task.provider_hint.as_deref(),
+                &format!(
+                    "Expanded retry scope for {} to include: {}",
+                    task.title,
+                    task.write_scope.join(", ")
+                ),
+            )?;
+        }
+        append_event_with_provider(
+            run_id,
+            "task_claimed",
+            Some(&task.task_id),
+            Some(&claim_provider),
+            task.task_category,
+            task.provider_hint.as_deref(),
+            &with_driver_context(
+                format!(
+                    "Started: {} [{}] via {}{}{}",
+                    task.title,
+                    generated_task_label(&task.kind),
+                    claim_provider,
+                    if requested_provider != claim.provider {
+                        let reason =
+                            if is_provider_on_cooldown(&run, &requested_provider, now).is_some() {
+                                format!("{} is on provider cooldown", requested_provider)
+                            } else {
+                                let cat_label = task
+                                    .task_category
+                                    .as_ref()
+                                    .map(|c| format!("'{:?}'", c).to_lowercase())
+                                    .unwrap_or_else(|| "this".to_string());
+                                format!(
+                                    "{} does not support {} task category",
+                                    requested_provider, cat_label
+                                )
+                            };
+                        format!(" (rerouted to {}: {})", claim_provider, reason)
+                    } else {
+                        String::new()
+                    },
+                    format_attempt_suffix(task)
+                ),
+                instance_pid,
+            ),
+        )?;
+        return Ok(Some(task.clone()));
+    }
+
+    Ok(None)
+}
+
 fn snapshot_lightweight_task_doc_before_write(
     _run_id: &str,
     run: &CoordinationRun,
@@ -67,6 +291,7 @@ fn snapshot_lightweight_task_doc_before_write(
     // no task-doc snapshot rail to maintain here.
     Ok(())
 }
+
 pub fn persist_design_consensus_draft_doc_copy(
     task: &CoordinationTask,
     artifact: &TaskArtifact,
@@ -102,6 +327,7 @@ pub fn persist_design_consensus_draft_doc_copy(
     })?;
     Ok(())
 }
+
 pub(crate) fn sync_run_summary_after_task_update(
     run_id: &str,
     updated_at: DateTime<Utc>,
@@ -147,6 +373,7 @@ pub(crate) fn sync_run_summary_after_task_update(
     }
     Ok(())
 }
+
 pub fn lightweight_provider_unavailable_message(
     provider_name: &str,
     cooldown: Option<&ProviderCooldown>,
@@ -178,6 +405,7 @@ pub fn lightweight_provider_unavailable_message(
         ),
     }
 }
+
 pub fn infer_failure_kind(message: &str) -> TaskFailureKind {
     let trimmed = message.trim();
     if trimmed.contains("[provider_unavailable]") {
@@ -196,6 +424,7 @@ pub fn infer_failure_kind(message: &str) -> TaskFailureKind {
         TaskFailureKind::Unknown
     }
 }
+
 pub fn recovery_action_for_failure_kind(kind: TaskFailureKind) -> TaskRecoveryAction {
     match kind {
         TaskFailureKind::Publish => TaskRecoveryAction::RetryPublish,
@@ -210,8 +439,10 @@ pub fn recovery_action_for_failure_kind(kind: TaskFailureKind) -> TaskRecoveryAc
         | TaskFailureKind::Unknown => TaskRecoveryAction::RetryTask,
     }
 }
+
 const SEMANTIC_REPAIR_CONTEXT_MARKER: &str = "Automatic repair context:";
 pub(super) const AUTO_REPAIR_MAX_ATTEMPTS: u32 = 10;
+
 pub(crate) fn is_pre_execution_rail_failure(message: &str) -> bool {
     let trimmed = message.trim();
     trimmed.starts_with("input rail rejected task:")
@@ -221,6 +452,7 @@ pub(crate) fn is_pre_execution_rail_failure(message: &str) -> bool {
         || trimmed.starts_with("dialog rail interrupted task:")
         || trimmed.starts_with("dialog rail requested reask:")
 }
+
 fn semantic_repair_prompt(prompt: &str, failure_message: &str) -> String {
     let base = prompt
         .split_once(SEMANTIC_REPAIR_CONTEXT_MARKER)
@@ -231,6 +463,7 @@ fn semantic_repair_prompt(prompt: &str, failure_message: &str) -> String {
         marker = SEMANTIC_REPAIR_CONTEXT_MARKER,
     )
 }
+
 fn requeue_task_for_semantic_repair(
     run_id: &str,
     task: &mut CoordinationTask,
@@ -288,6 +521,227 @@ fn requeue_task_for_semantic_repair(
     sync_run_summary_after_task_update(run_id, now)?;
     Ok(true)
 }
+
+pub fn fail_lightweight_task_for_unavailable_provider(
+    run_id: &str,
+    task: &mut CoordinationTask,
+    provider_name: &str,
+    cooldown: Option<&ProviderCooldown>,
+    detail: &str,
+) -> Result<()> {
+    let message = lightweight_provider_unavailable_message(provider_name, cooldown, detail);
+    let now = Utc::now();
+    task.status = CoordinationTaskStatus::Failed;
+    task.failure_kind = Some(TaskFailureKind::ProviderUnavailable);
+    task.recovery_action = Some(TaskRecoveryAction::ManualIntervention);
+    task.claimed_by = None;
+    task.artifact_summary = Some(message.clone());
+    task.updated_at = now;
+    write_json_atomic(&task_path(run_id, &task.task_id), task)?;
+    index_task(task);
+    let _ = fs::remove_file(claim_path(run_id, &task.task_id));
+    if let Some(cooldown) = cooldown {
+        append_event_with_provider(
+            run_id,
+            "provider_cooldown",
+            Some(&task.task_id),
+            Some(provider_name),
+            task.task_category,
+            task.provider_hint.as_deref(),
+            &format!(
+                "Provider {} unavailable until {}. {}",
+                provider_name,
+                cooldown.unavailable_until.to_rfc3339(),
+                cooldown.reason
+            ),
+        )?;
+    }
+    append_event_with_provider(
+        run_id,
+        "task_failed",
+        Some(&task.task_id),
+        Some(provider_name),
+        task.task_category,
+        task.provider_hint.as_deref(),
+        &format!("Failed: {}. {}", task.title, message),
+    )?;
+    sync_run_summary_after_task_update(run_id, task.updated_at)?;
+    Ok(())
+}
+
+pub fn fail_task(run_id: &str, task_id: &str, instance_pid: u32, message: &str) -> Result<()> {
+    let claim = load_claim(run_id, task_id)?;
+    if claim.instance_pid != instance_pid {
+        anyhow::bail!(
+            "task {} for run {} is owned by PID {}, not {}",
+            task_id,
+            run_id,
+            claim.instance_pid,
+            instance_pid
+        );
+    }
+
+    let mut task = load_task(run_id, task_id)?;
+    let provider_name = task
+        .assigned_provider
+        .clone()
+        .unwrap_or_else(|| claim.provider.clone());
+    if recover_perf_idea_failure(run_id, &mut task, instance_pid, &provider_name, message)? {
+        return Ok(());
+    }
+    let artifact_dir_path = artifact_dir(run_id, task_id);
+    let notes_path = artifact_notes_path(run_id, task_id);
+    let result_path = artifact_result_path(run_id, task_id);
+    let materialized_files_path = artifact_materialized_files_path(run_id, task_id);
+    warn!(
+        run_id = %run_id,
+        task_id = %task_id,
+        instance_pid,
+        notes_path = %notes_path.display(),
+        result_path = %result_path.display(),
+        materialized_files_path = %materialized_files_path.display(),
+        message = %message,
+        "recording failed task without structured artifact result"
+    );
+    fs::create_dir_all(&artifact_dir_path)?;
+    fs::write(&notes_path, message)?;
+    let _ = fs::remove_file(materialized_files_path);
+    warn!(
+        run_id = %run_id,
+        task_id = %task_id,
+        notes_path = %notes_path.display(),
+        result_path = %result_path.display(),
+        "wrote failed task notes artifact"
+    );
+    finalize_failed_task(run_id, &mut task, instance_pid, message)?;
+    Ok(())
+}
+
+pub fn finalize_blocked_write_task(
+    run_id: &str,
+    task: &mut CoordinationTask,
+    instance_pid: u32,
+    provider_name: &str,
+    message: &str,
+) -> Result<()> {
+    let current_attempt = task.attempt_count.max(1);
+    task.failure_kind = Some(TaskFailureKind::BlockedWrite);
+    task.recovery_action = Some(TaskRecoveryAction::ManualIntervention);
+    task.status = CoordinationTaskStatus::Failed;
+    task.claimed_by = Some(instance_pid);
+    task.artifact_summary = Some(message.to_string());
+    task.updated_at = Utc::now();
+
+    write_json_atomic(&task_path(run_id, &task.task_id), task)?;
+    index_task(task);
+    let _ = fs::remove_file(claim_path(run_id, &task.task_id));
+    append_event_with_provider(
+        run_id,
+        "task_failed",
+        Some(&task.task_id),
+        Some(provider_name),
+        task.task_category,
+        task.provider_hint.as_deref(),
+        &format!(
+            "Failed: {}{}. {}",
+            task.title,
+            format_failure_attempt_suffix(current_attempt, task.max_attempts),
+            message
+        ),
+    )?;
+    sync_run_summary_after_task_update(run_id, task.updated_at)?;
+    Ok(())
+}
+
+pub fn finalize_failed_task(
+    run_id: &str,
+    task: &mut CoordinationTask,
+    instance_pid: u32,
+    message: &str,
+) -> Result<()> {
+    let run = load_run(run_id)?;
+    let provider_name = task
+        .assigned_provider
+        .as_deref()
+        .unwrap_or(run.provider.as_str())
+        .to_string();
+    if is_provider_backed(task)
+        && requeue_task_for_provider_cooldown(
+            run_id,
+            &task.task_id,
+            instance_pid,
+            &provider_name,
+            message,
+        )?
+    {
+        return Ok(());
+    }
+
+    let current_attempt = task.attempt_count.max(1);
+    let can_retry = should_auto_retry_task(&run, task, Some(message));
+    let failure_kind = infer_failure_kind(message);
+    let recovery_action = if can_retry {
+        recovery_action_for_failure_kind(failure_kind)
+    } else {
+        TaskRecoveryAction::ManualIntervention
+    };
+
+    if !can_retry
+        && requeue_task_for_semantic_repair(run_id, task, &provider_name, failure_kind, message)?
+    {
+        return Ok(());
+    }
+
+    task.claimed_by = Some(instance_pid);
+    task.artifact_summary = Some(message.to_string());
+    task.failure_kind = Some(failure_kind);
+    task.recovery_action = Some(recovery_action);
+    task.updated_at = Utc::now();
+
+    task.status = CoordinationTaskStatus::Failed;
+    write_json_atomic(&task_path(run_id, &task.task_id), task)?;
+    index_task(task);
+    let _ = fs::remove_file(claim_path(run_id, &task.task_id));
+    append_event_with_provider(
+        run_id,
+        "task_failed",
+        Some(&task.task_id),
+        Some(&provider_name),
+        task.task_category,
+        task.provider_hint.as_deref(),
+        &format!(
+            "Failed: {}{}. {}",
+            task.title,
+            format_failure_attempt_suffix(current_attempt, task.max_attempts),
+            message
+        ),
+    )?;
+
+    if can_retry {
+        task.status = CoordinationTaskStatus::Queued;
+        task.claimed_by = None;
+        if task.recovery_action == Some(TaskRecoveryAction::RetryTask) {
+            task.recovery_action = None;
+        }
+        write_json_atomic(&task_path(run_id, &task.task_id), task)?;
+        index_task(task);
+        append_event_with_provider(
+            run_id,
+            "task_retry_scheduled",
+            Some(&task.task_id),
+            Some(&provider_name),
+            task.task_category,
+            task.provider_hint.as_deref(),
+            &format!(
+                "Retry scheduled: {} after attempt {}/{}. {}",
+                task.title, current_attempt, task.max_attempts, message
+            ),
+        )?;
+    }
+    sync_run_summary_after_task_update(run_id, task.updated_at)?;
+    Ok(())
+}
+
 fn format_failure_attempt_suffix(current_attempt: u32, max_attempts: u32) -> String {
     if current_attempt <= 1 || max_attempts <= 1 {
         String::new()
@@ -295,6 +749,39 @@ fn format_failure_attempt_suffix(current_attempt: u32, max_attempts: u32) -> Str
         format!(" after attempt {current_attempt}/{max_attempts}")
     }
 }
+
+pub fn heartbeat_claim(run_id: &str, task_id: &str, instance_pid: u32) -> Result<()> {
+    let claim = match load_claim(run_id, task_id) {
+        Ok(c) => c,
+        Err(source) => {
+            return Err(ClaimError::NoLongerExists {
+                task_id: task_id.to_string(),
+                run_id: run_id.to_string(),
+                source,
+            }
+            .into());
+        }
+    };
+    if claim.instance_pid != instance_pid {
+        return Err(ClaimError::OwnedByOtherPid {
+            task_id: task_id.to_string(),
+            run_id: run_id.to_string(),
+            other_pid: claim.instance_pid,
+            instance_pid,
+        }
+        .into());
+    }
+    let now = Utc::now();
+    let mut claim = claim;
+    claim.last_heartbeat_at = now;
+    write_json_atomic(&claim_path(run_id, task_id), &claim)?;
+
+    let mut task = load_task(run_id, task_id)?;
+    task.updated_at = now;
+    write_json_atomic(&task_path(run_id, task_id), &task)?;
+    Ok(())
+}
+
 pub fn adopt_claim_in_memory(
     claim: &mut TaskClaim,
     task: &mut CoordinationTask,
@@ -325,6 +812,7 @@ pub fn adopt_claim_in_memory(
     task.updated_at = now;
     Ok(())
 }
+
 pub fn adopt_claim_for_worker(
     run_id: &str,
     task_id: &str,
@@ -339,6 +827,7 @@ pub fn adopt_claim_for_worker(
     write_json_atomic(&task_path(run_id, task_id), &task)?;
     Ok(())
 }
+
 pub fn expire_stale_claims(run_id: &str) -> Result<()> {
     let entries = match fs::read_dir(claims_dir(run_id)) {
         Ok(entries) => entries,
@@ -386,10 +875,12 @@ pub fn expire_stale_claims(run_id: &str) -> Result<()> {
     }
     Ok(())
 }
+
 #[cfg(unix)]
 fn process_is_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
+
 pub fn stop_detached_workers(worker_pids: &[u32]) {
     for pid in worker_pids {
         #[cfg(unix)]
@@ -414,6 +905,7 @@ pub fn stop_detached_workers(worker_pids: &[u32]) {
         }
     }
 }
+
 pub fn merge_retry_scope_entries(write_scope: &mut Vec<String>, additions: Vec<String>) -> bool {
     let mut changed = false;
     for addition in additions {
@@ -424,4 +916,20 @@ pub fn merge_retry_scope_entries(write_scope: &mut Vec<String>, additions: Vec<S
         changed = true;
     }
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_failure_attempt_suffix_omits_first_attempt() {
+        assert_eq!(format_failure_attempt_suffix(1, 3), "");
+        assert_eq!(format_failure_attempt_suffix(1, 1), "");
+    }
+
+    #[test]
+    fn format_failure_attempt_suffix_keeps_later_attempts() {
+        assert_eq!(format_failure_attempt_suffix(2, 3), " after attempt 2/3");
+    }
 }

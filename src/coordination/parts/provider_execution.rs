@@ -38,6 +38,11 @@ use std::thread;
 use std::time::Duration;
 #[allow(unused_imports)]
 use uuid::Uuid;
+#[path = "provider_execution_retries.rs"]
+mod provider_execution_retries;
+pub use provider_execution_retries::{
+    requeue_task_for_provider_cooldown, requeue_task_for_provider_timeout,
+};
 pub fn should_force_skip_git_repo_check(run: &CoordinationRun, task: &CoordinationTask) -> bool {
     matches!(run.workflow_mode, AutonomousWorkflowMode::PerfHillClimber)
         && matches!(

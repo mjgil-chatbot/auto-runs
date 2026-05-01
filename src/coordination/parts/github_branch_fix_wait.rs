@@ -1,6 +1,8 @@
 use super::*;
+
 const GITHUB_BRANCH_FIX_WAITING_MARKER: &str = "WAITING_FOR_SUCCESS:";
 const GITHUB_BRANCH_FIX_SUCCESS_MARKER: &str = "SUCCESS_CONFIRMED:";
+
 pub fn github_branch_fix_poll_task_should_respawn(
     run: &CoordinationRun,
     task: &CoordinationTask,
@@ -24,6 +26,7 @@ pub fn github_branch_fix_poll_task_should_respawn(
         || acceptance_checks.contains("latest run status is success")
         || acceptance_checks.contains("successful run identified or confirmed none exists post-fix")
 }
+
 pub fn github_branch_fix_poll_completion_should_respawn(
     run: &CoordinationRun,
     task: &CoordinationTask,
@@ -44,6 +47,50 @@ pub fn github_branch_fix_poll_completion_should_respawn(
         )),
     }
 }
+
+pub fn requeue_github_branch_fix_poll_completion(
+    run_id: &str,
+    task: &mut CoordinationTask,
+    provider_name: &str,
+    artifact: &TaskArtifact,
+) -> Result<bool> {
+    let run = load_run(run_id)?;
+    if run.status != CoordinationRunStatus::Active
+        || !github_branch_fix_poll_completion_should_respawn(&run, task, artifact)?
+    {
+        return Ok(false);
+    }
+
+    let now = Utc::now();
+    let current_attempt = task.attempt_count.max(1);
+    task.status = CoordinationTaskStatus::Queued;
+    task.claimed_by = None;
+    task.artifact_summary = Some(format!(
+        "{} [{}]",
+        artifact.summary,
+        artifact.report.outcome.as_str()
+    ));
+    task.attempt_count = task.attempt_count.saturating_sub(1);
+    task.updated_at = now;
+    write_json_atomic(&task_path(run_id, &task.task_id), task)?;
+    index_task(task);
+    let _ = fs::remove_file(claim_path(run_id, &task.task_id));
+    append_event_with_provider(
+        run_id,
+        "task_retry_scheduled",
+        Some(&task.task_id),
+        Some(provider_name),
+        task.task_category,
+        task.provider_hint.as_deref(),
+        &format!(
+            "Retry scheduled: {} after attempt {}/{}. GitHub Actions for the latest branch-fix commit has not succeeded yet, so the wait task returned to queue without consuming attempt budget. {}",
+            task.title, current_attempt, task.max_attempts, artifact.summary
+        ),
+    )?;
+    sync_run_summary_after_task_update(run_id, now)?;
+    Ok(true)
+}
+
 pub fn github_branch_fix_wait_for_success_spec(run: &CoordinationRun) -> GeneratedTaskSpec {
     let config = github_branch_fix_config_from_run(run)
         .expect("GitHub branch fix config should exist for synthesized wait tasks");
@@ -79,12 +126,14 @@ pub fn github_branch_fix_wait_for_success_spec(run: &CoordinationRun) -> Generat
         ],
     }
 }
+
 fn github_branch_fix_artifact_contains_marker(artifact: &TaskArtifact, marker: &str) -> bool {
     artifact.body.contains(marker)
         || artifact.summary.contains(marker)
         || artifact.report.summary.contains(marker)
         || artifact.report.details.contains(marker)
 }
+
 fn github_branch_fix_successful_run_for_head_exists(
     run: &CoordinationRun,
     task: &CoordinationTask,
@@ -133,6 +182,7 @@ fn github_branch_fix_successful_run_for_head_exists(
                 .unwrap_or(false)
     }))
 }
+
 fn github_branch_fix_wait_run_git(workspace: &Path, args: &[&str]) -> Result<String> {
     let output = std::process::Command::new("git")
         .arg("-C")
@@ -151,6 +201,7 @@ fn github_branch_fix_wait_run_git(workspace: &Path, args: &[&str]) -> Result<Str
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
+
 fn github_branch_fix_gh_program() -> String {
     std::env::var("AUTO_RUNS_GH_BIN")
         .ok()
@@ -158,6 +209,7 @@ fn github_branch_fix_gh_program() -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "gh".to_string())
 }
+
 /// CI status for a branch-fix run — determines whether to run LLM tasks or stay silent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GithubBranchFixCiStatus {
@@ -170,6 +222,7 @@ pub enum GithubBranchFixCiStatus {
     /// Could not determine CI state (gh CLI error or no runs found).
     Unknown,
 }
+
 /// Returns the CI status for the branch in the given run.
 /// Uses `gh run list` directly — no LLM involved.
 ///
