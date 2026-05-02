@@ -1,6 +1,20 @@
 use super::*;
 #[allow(unused_imports)]
-use crate::AutonomousWorkflowMode;
+use crate::config;
+#[allow(unused_imports)]
+use crate::data::ChatSession;
+#[allow(unused_imports)]
+use crate::memory;
+#[allow(unused_imports)]
+use crate::model::ModelProvider;
+#[allow(unused_imports)]
+use crate::provider_bridge::{
+    autonomous_provider_overrides, call_provider_cli_stream_with_overrides,
+};
+#[allow(unused_imports)]
+use crate::{
+    AutonomousExecutionEnvironment, AutonomousWorkflowMode, ReviewFixMode, ReviewScope, TurnPolicy,
+};
 #[allow(unused_imports)]
 use anyhow::{Context, Result};
 #[allow(unused_imports)]
@@ -30,6 +44,7 @@ use std::thread;
 use std::time::Duration;
 #[allow(unused_imports)]
 use uuid::Uuid;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RailStage {
@@ -38,6 +53,7 @@ pub enum RailStage {
     Execution,
     Output,
 }
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "decision")]
 pub enum RailDecision {
@@ -58,10 +74,13 @@ pub enum RailDecision {
         payload: serde_json::Value,
     },
 }
+
 impl RailDecision {
     pub fn is_blocking(&self) -> bool {
         matches!(self, Self::Reject { .. } | Self::Interrupt { .. })
-    }}
+    }
+}
+
 pub fn rail_event(task_id: &str, stage: &RailStage, decision: &RailDecision) -> CoordinationEvent {
     let message = match decision {
         RailDecision::Allow => format!("{stage:?} rail: allow"),
@@ -85,6 +104,7 @@ pub fn rail_event(task_id: &str, stage: &RailStage, decision: &RailDecision) -> 
         message,
     }
 }
+
 fn task_requires_existing_design_doc(run: &CoordinationRun, task: &CoordinationTask) -> bool {
     match task.kind {
         CoordinationTaskKind::PlanFlatTasks => {
@@ -95,6 +115,7 @@ fn task_requires_existing_design_doc(run: &CoordinationRun, task: &CoordinationT
         _ => false,
     }
 }
+
 fn declared_write_scope_reminder(task: &CoordinationTask) -> Option<String> {
     if !task_mutates_workspace(task) || task.write_scope.is_empty() {
         return None;
@@ -104,11 +125,13 @@ fn declared_write_scope_reminder(task: &CoordinationTask) -> Option<String> {
         task.write_scope.join(", ")
     ))
 }
+
 fn has_edit_tool(task: &CoordinationTask) -> bool {
     task.allowed_tools
         .iter()
         .any(|tool| tool.eq_ignore_ascii_case("edit"))
 }
+
 fn resolved_review_approval_exists(run_id: &str, task: &CoordinationTask) -> bool {
     let dependency_ids: BTreeSet<&str> = task.dependencies.iter().map(String::as_str).collect();
     load_interrupts(run_id).iter().any(|interrupt| {
@@ -124,6 +147,7 @@ fn resolved_review_approval_exists(run_id: &str, task: &CoordinationTask) -> boo
             )
     })
 }
+
 fn stage_label(stage: &RailStage) -> &'static str {
     match stage {
         RailStage::Input => "input",
@@ -132,6 +156,7 @@ fn stage_label(stage: &RailStage) -> &'static str {
         RailStage::Output => "output",
     }
 }
+
 fn rail_validation_error(stage: &RailStage, decision: &RailDecision) -> Option<String> {
     let stage = stage_label(stage);
     match decision {
@@ -143,6 +168,7 @@ fn rail_validation_error(stage: &RailStage, decision: &RailDecision) -> Option<S
         }
     }
 }
+
 pub fn persist_rail_decision(
     run: &CoordinationRun,
     task: &CoordinationTask,
@@ -188,6 +214,7 @@ pub fn persist_rail_decision(
         &event.message,
     )
 }
+
 pub fn apply_completion_rails(
     run: &CoordinationRun,
     task: &CoordinationTask,
@@ -216,6 +243,7 @@ pub fn apply_completion_rails(
     }
     Ok(errors)
 }
+
 pub fn apply_lightweight_completion_rails(
     run: &CoordinationRun,
     task: &CoordinationTask,
@@ -224,6 +252,7 @@ pub fn apply_lightweight_completion_rails(
 ) -> Vec<String> {
     validate_lightweight_task_doc_read_only(run, task, materialized_files)
 }
+
 fn validate_lightweight_task_doc_read_only(
     run: &CoordinationRun,
     task: &CoordinationTask,
@@ -245,6 +274,7 @@ fn validate_lightweight_task_doc_read_only(
         task_doc_path
     )]
 }
+
 fn lightweight_generated_write_touched_task_doc_path(
     run: &CoordinationRun,
     materialized_files: &[MaterializedArtifactFile],
@@ -261,6 +291,7 @@ fn lightweight_generated_write_touched_task_doc_path(
             .cloned()
     })
 }
+
 pub fn check_input_rail(run: &CoordinationRun, task: &CoordinationTask) -> RailDecision {
     if run.workspace_path.trim().is_empty() {
         return RailDecision::Reject {
@@ -305,6 +336,7 @@ pub fn check_input_rail(run: &CoordinationRun, task: &CoordinationTask) -> RailD
     }
     RailDecision::Allow
 }
+
 fn github_branch_fix_gh_auth_check(run: &CoordinationRun, task: &CoordinationTask) -> Result<()> {
     if run.workflow_mode != AutonomousWorkflowMode::GithubBranchFix
         || !matches!(
@@ -366,10 +398,12 @@ fn github_branch_fix_gh_auth_check(run: &CoordinationRun, task: &CoordinationTas
         detail
     );
 }
+
 fn gh_auth_status_active_unsupported(stderr: &str) -> bool {
     let trimmed = stderr.trim().to_ascii_lowercase();
     trimmed.contains("unknown flag: --active") || trimmed.contains("unknown flag `active`")
 }
+
 pub fn check_dialog_rail(task: &CoordinationTask, query: &str) -> RailDecision {
     let mut additions = Vec::new();
     let response_contract = provider_response_contract(task);
@@ -389,6 +423,7 @@ pub fn check_dialog_rail(task: &CoordinationTask, query: &str) -> RailDecision {
         }
     }
 }
+
 pub fn check_execution_rail(
     run: &CoordinationRun,
     task: &CoordinationTask,
@@ -433,6 +468,7 @@ pub fn check_execution_rail(
     }
     RailDecision::Allow
 }
+
 pub fn check_output_rail(
     run: &CoordinationRun,
     task: &CoordinationTask,
@@ -467,4 +503,184 @@ pub fn check_output_rail(
         }
     }
     RailDecision::Allow
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_task_artifact() -> TaskArtifact {
+        TaskArtifact {
+            run_id: "run".to_string(),
+            task_id: "task".to_string(),
+            provider: Some("codex".to_string()),
+            task_category: Some(TaskCategory::DeepWrite),
+            fallback_from: None,
+            summary: String::new(),
+            body: String::new(),
+            completed_at: Utc::now(),
+            report: TaskExecutionReport::default(),
+        }
+    }
+
+    #[test]
+    fn lightweight_generated_write_read_only_rail_rejects_active_task_doc_changes() {
+        let run = CoordinationRun {
+            run_id: "run".to_string(),
+            root_chat_id: "chat".to_string(),
+            workspace_path: ".".to_string(),
+            execution_environment: AutonomousExecutionEnvironment::Host,
+            runsc_workspace_includes: Vec::new(),
+            provider: "codex".to_string(),
+            goal: "goal".to_string(),
+            workflow_mode: AutonomousWorkflowMode::LightweightImplementation,
+            design_doc_path: "docs/design.md".to_string(),
+            completion_criteria: String::new(),
+            max_iterations: 1,
+            status: CoordinationRunStatus::Active,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            created_by_instance: None,
+            max_agents: 1,
+            allow_write_tasks: true,
+            require_review_before_apply: false,
+            auto_retry_failed_tasks: false,
+            notes: "lightweight_task_doc=docs/autonomous/lightweight-tasks.md".to_string(),
+            review_scope: None,
+            review_dimensions: None,
+            review_fix_mode: None,
+            council_turn_policy: None,
+            council_max_turns: None,
+            provider_cooldowns: BTreeMap::new(),
+            task_ids: Vec::new(),
+            processed_mutation_batch_ids: BTreeSet::new(),
+        };
+        let task = CoordinationTask {
+            provider_hint: None,
+            required_role: None,
+            task_category: Some(TaskCategory::DeepWrite),
+            task_id: "task".to_string(),
+            run_id: run.run_id.clone(),
+            parent_task_id: None,
+            kind: CoordinationTaskKind::GeneratedWriteTask,
+            assigned_provider: Some("codex".to_string()),
+            iteration: None,
+            title: "Write".to_string(),
+            prompt: "prompt".to_string(),
+            cwd: ".".to_string(),
+            allowed_tools: vec!["filesystem".to_string(), "edit".to_string()],
+            read_scope: vec!["**".to_string()],
+            write_scope: vec!["**".to_string()],
+            acceptance_checks: Vec::new(),
+            review_metadata: None,
+            dependencies: Vec::new(),
+            execution_generation: 0,
+            dependency_generation: None,
+            attempt_count: 0,
+            max_attempts: 1,
+            publish_attempt_count: 0,
+            estimated_minutes: None,
+            status: CoordinationTaskStatus::Queued,
+            claimed_by: None,
+            artifact_summary: None,
+            failure_kind: None,
+            recovery_action: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let errors = apply_lightweight_completion_rails(
+            &run,
+            &task,
+            &test_task_artifact(),
+            &[MaterializedArtifactFile {
+                path: "docs/autonomous/lightweight-tasks.md".to_string(),
+                content: "- [x] changed\n".to_string(),
+            }],
+        );
+
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("may not modify task-list document"));
+    }
+
+    #[test]
+    fn lightweight_generated_write_read_only_rail_rejects_next_task_doc_changes() {
+        let run = CoordinationRun {
+            run_id: "run".to_string(),
+            root_chat_id: "chat".to_string(),
+            workspace_path: ".".to_string(),
+            execution_environment: AutonomousExecutionEnvironment::Host,
+            runsc_workspace_includes: Vec::new(),
+            provider: "codex".to_string(),
+            goal: "goal".to_string(),
+            workflow_mode: AutonomousWorkflowMode::LightweightImplementation,
+            design_doc_path: "docs/design.md".to_string(),
+            completion_criteria: String::new(),
+            max_iterations: 1,
+            status: CoordinationRunStatus::Active,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            created_by_instance: None,
+            max_agents: 1,
+            allow_write_tasks: true,
+            require_review_before_apply: false,
+            auto_retry_failed_tasks: false,
+            notes: "lightweight_task_doc=docs/autonomous/lightweight-tasks-pass-1.md".to_string(),
+            review_scope: None,
+            review_dimensions: None,
+            review_fix_mode: None,
+            council_turn_policy: None,
+            council_max_turns: None,
+            provider_cooldowns: BTreeMap::new(),
+            task_ids: Vec::new(),
+            processed_mutation_batch_ids: BTreeSet::new(),
+        };
+        let next_task_doc_path = lightweight_next_task_doc_path_for_run(&run);
+        let task = CoordinationTask {
+            provider_hint: None,
+            required_role: None,
+            task_category: Some(TaskCategory::DeepWrite),
+            task_id: "task".to_string(),
+            run_id: run.run_id.clone(),
+            parent_task_id: None,
+            kind: CoordinationTaskKind::GeneratedWriteTask,
+            assigned_provider: Some("codex".to_string()),
+            iteration: None,
+            title: "Write".to_string(),
+            prompt: "prompt".to_string(),
+            cwd: ".".to_string(),
+            allowed_tools: vec!["filesystem".to_string(), "edit".to_string()],
+            read_scope: vec!["**".to_string()],
+            write_scope: vec!["**".to_string()],
+            acceptance_checks: Vec::new(),
+            review_metadata: None,
+            dependencies: Vec::new(),
+            execution_generation: 0,
+            dependency_generation: None,
+            attempt_count: 0,
+            max_attempts: 1,
+            publish_attempt_count: 0,
+            estimated_minutes: None,
+            status: CoordinationTaskStatus::Queued,
+            claimed_by: None,
+            artifact_summary: None,
+            failure_kind: None,
+            recovery_action: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let errors = apply_lightweight_completion_rails(
+            &run,
+            &task,
+            &test_task_artifact(),
+            &[MaterializedArtifactFile {
+                path: next_task_doc_path.clone(),
+                content: "- [ ] next pass\n".to_string(),
+            }],
+        );
+
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains(&next_task_doc_path));
+    }
 }
