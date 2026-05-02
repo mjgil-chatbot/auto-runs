@@ -2,18 +2,22 @@ use std::fs;
 use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use rust_debug::tracing::{debug, info, warn};
 use serde::{Deserialize, Serialize};
+
 use crate::coordination::{self, RunSummaryRow};
+
 pub const DEFAULT_DRIVER_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const DRIVER_HEARTBEAT_TTL: Duration = Duration::from_secs(3);
 const DRIVER_LOCK_RECOVERY_WAIT: Duration = Duration::from_secs(5);
 const DRIVER_LOCK_RECOVERY_POLL: Duration = Duration::from_millis(250);
 const DRIVER_RECONCILE_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 const DRIVER_POLL_MS_ENV: &str = "RUST_CHATBOT_AUTO_RUNS_DRIVER_POLL_MS";
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DriverStatus {
     pub pid: u32,
@@ -28,7 +32,9 @@ pub struct DriverStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
 }
+
 struct DriverProcessLock(fs::File);
+
 #[derive(Clone, Debug)]
 struct DriverRuntime {
     pid: u32,
@@ -36,6 +42,7 @@ struct DriverRuntime {
     executable_path: String,
     executable_deleted: bool,
 }
+
 impl DriverStatus {
     fn summary(&self) -> String {
         let started_at = self
@@ -46,7 +53,9 @@ impl DriverStatus {
             "driver pid={}, started_at={}, exe={}, deleted={}",
             self.pid, started_at, self.executable_path, self.executable_deleted
         )
-    }}
+    }
+}
+
 impl Drop for DriverProcessLock {
     fn drop(&mut self) {
         if let Err(err) = self.0.unlock() {
@@ -54,18 +63,21 @@ impl Drop for DriverProcessLock {
         }
     }
 }
+
 pub fn should_drive_run(run: &RunSummaryRow) -> bool {
     matches!(
         run.status.as_str(),
         "active" | "recovering" | "waiting_for_artifacts" | "waiting_for_policy"
     )
 }
+
 pub fn background_driver_is_healthy() -> Result<bool> {
     let Some(status) = load_background_driver_status()? else {
         return Ok(false);
     };
     Ok(driver_status_is_healthy(&status))
 }
+
 pub fn load_background_driver_status() -> Result<Option<DriverStatus>> {
     let path = driver_status_path();
     let raw = match fs::read_to_string(&path) {
@@ -77,16 +89,134 @@ pub fn load_background_driver_status() -> Result<Option<DriverStatus>> {
         .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(Some(status))
 }
+
+pub fn drive_active_runs_once(instance_pid: u32) -> Result<bool> {
+    // Read from authoritative run.json files instead of the SQLite index so a
+    // stale or out-of-sync index can never hide a live run from the driver.
+    let runs = coordination::query_runs_from_authoritative_files(
+        &coordination::RunQuery {
+            ..Default::default()
+        },
+        None,
+    )?;
+    let mut did_work = false;
+    for run in runs.iter().filter(|run| should_drive_run(run)) {
+        match coordination::drive_run_for_instance(&run.run_id, instance_pid, &run.provider) {
+            Ok(progressed) => did_work |= progressed,
+            Err(err) => {
+                warn!(
+                    run_id = %run.run_id,
+                    provider = %run.provider,
+                    status = %run.status,
+                    workflow_mode = ?run.workflow_mode,
+                    error = %err,
+                    "background driver skipped broken run and continued"
+                );
+            }
+        }
+    }
+    Ok(did_work)
+}
+
+pub fn reconcile_active_runs_once() -> Result<bool> {
+    let runs = coordination::query_runs_from_authoritative_files(
+        &coordination::RunQuery {
+            ..Default::default()
+        },
+        None,
+    )?;
+    let mut changed = false;
+    for run in runs.iter().filter(|run| should_drive_run(run)) {
+        match coordination::replay_incomplete_mutation_batches_for_run(&run.run_id) {
+            Ok(replayed) => changed |= replayed,
+            Err(err) => warn!(run_id = %run.run_id, error = %err, "mutation replay sweep failed"),
+        }
+        match coordination::reconcile_run_state(&run.run_id) {
+            Ok(reconciled) => changed |= reconciled,
+            Err(err) => warn!(run_id = %run.run_id, error = %err, "reconcile sweep failed"),
+        }
+    }
+    Ok(changed)
+}
+
+pub fn run_background_driver_loop() -> Result<()> {
+    let Some(_lock) = acquire_driver_lock_with_recovery()? else {
+        info!("background driver already active; exiting duplicate launcher");
+        return Ok(());
+    };
+
+    // Ensure the worker queue FIFOs exist before entering the main loop.
+    // The FIFO server runs in a spawned thread below.
+    if let Err(err) = coordination::ensure_worker_queue_fifos() {
+        warn!(error = %err, "failed to create worker queue FIFOs; continuing anyway");
+    }
+
+    // Spawn the FIFO worker queue server in a dedicated thread. This thread
+    // lives for the lifetime of the driver process.
+    thread::Builder::new()
+        .name("worker-queue-server".into())
+        .spawn(coordination::run_worker_queue_server)
+        .with_context(|| "failed to spawn worker queue server thread")?;
+
+    let poll_interval = poll_interval_from_env(DEFAULT_DRIVER_POLL_INTERVAL);
+    let started_at = Utc::now();
+    let runtime = current_driver_runtime(started_at);
+    info!(
+        pid = runtime.pid,
+        poll_interval_ms = poll_interval.as_millis() as u64,
+        executable_path = %runtime.executable_path,
+        "background driver loop started"
+    );
+    let mut last_reconcile_sweep = Instant::now() - DRIVER_RECONCILE_SWEEP_INTERVAL;
+
+    loop {
+        let runtime = current_driver_runtime(started_at);
+        if runtime.executable_deleted {
+            let _ = write_driver_status(
+                &runtime,
+                poll_interval,
+                Some("stale_executable".to_string()),
+            );
+            warn!(
+                pid = runtime.pid,
+                executable_path = %runtime.executable_path,
+                "background driver executable is stale; exiting so a fresh driver can take over"
+            );
+            anyhow::bail!(
+                "background driver executable for pid {} is stale: {}",
+                runtime.pid,
+                runtime.executable_path
+            );
+        }
+        if let Err(err) = write_driver_status(&runtime, poll_interval, None) {
+            warn!(error = %err, "failed to persist background driver heartbeat");
+        }
+        if last_reconcile_sweep.elapsed() >= DRIVER_RECONCILE_SWEEP_INTERVAL {
+            if let Err(err) = reconcile_active_runs_once() {
+                warn!(error = %err, "background reconciler sweep failed");
+            }
+            last_reconcile_sweep = Instant::now();
+        }
+        if let Err(err) = drive_active_runs_once(runtime.pid) {
+            warn!(error = %err, "background driver iteration failed");
+        }
+        std::thread::sleep(poll_interval);
+    }
+}
+
 pub fn current_driver_claim_context(instance_pid: u32) -> Option<String> {
     let status = load_background_driver_status().ok().flatten()?;
     (status.pid == instance_pid).then(|| status.summary())
 }
+
 fn driver_status_path() -> PathBuf {
     coordination::coordination_root_dir().join("background-driver.json")
 }
+
 fn driver_lock_path() -> PathBuf {
     coordination::coordination_root_dir().join("background-driver.lock")
 }
+
 fn write_driver_status(
     runtime: &DriverRuntime,
     poll_interval: Duration,
@@ -103,6 +233,7 @@ fn write_driver_status(
     };
     coordination::write_json_atomic(&driver_status_path(), &status)
 }
+
 fn poll_interval_from_env(default: Duration) -> Duration {
     let Some(raw) = std::env::var_os(DRIVER_POLL_MS_ENV) else {
         return default;
@@ -118,6 +249,7 @@ fn poll_interval_from_env(default: Duration) -> Duration {
     }
     Duration::from_millis(ms)
 }
+
 fn try_acquire_driver_lock() -> Result<Option<DriverProcessLock>> {
     let path = driver_lock_path();
     let parent = path.parent().context("driver lock path missing parent")?;
@@ -134,6 +266,7 @@ fn try_acquire_driver_lock() -> Result<Option<DriverProcessLock>> {
         Err(err) => Err(err).with_context(|| format!("failed to acquire {}", path.display())),
     }
 }
+
 fn acquire_driver_lock_with_recovery() -> Result<Option<DriverProcessLock>> {
     let deadline = Instant::now() + DRIVER_LOCK_RECOVERY_WAIT;
     loop {
@@ -151,6 +284,7 @@ fn acquire_driver_lock_with_recovery() -> Result<Option<DriverProcessLock>> {
         std::thread::sleep(DRIVER_LOCK_RECOVERY_POLL);
     }
 }
+
 fn driver_status_is_healthy(status: &DriverStatus) -> bool {
     let age = Utc::now()
         .signed_duration_since(status.heartbeat_at)
@@ -158,6 +292,34 @@ fn driver_status_is_healthy(status: &DriverStatus) -> bool {
         .unwrap_or_default();
     age <= DRIVER_HEARTBEAT_TTL && !status.executable_deleted && status.stop_reason.is_none()
 }
+
+fn current_driver_runtime(started_at: DateTime<Utc>) -> DriverRuntime {
+    let (executable_path, executable_deleted) = current_executable_state();
+    DriverRuntime {
+        pid: std::process::id(),
+        started_at,
+        executable_path,
+        executable_deleted,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn current_executable_state() -> (String, bool) {
+    match fs::read_link("/proc/self/exe") {
+        Ok(path) => {
+            let path = path.to_string_lossy().into_owned();
+            let deleted = path.ends_with(" (deleted)");
+            (path, deleted)
+        }
+        Err(_) => fallback_executable_state(),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn current_executable_state() -> (String, bool) {
+    fallback_executable_state()
+}
+
 fn fallback_executable_state() -> (String, bool) {
     match std::env::current_exe() {
         Ok(path) => {
@@ -167,6 +329,7 @@ fn fallback_executable_state() -> (String, bool) {
         Err(_) => ("unknown".to_string(), false),
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::{
