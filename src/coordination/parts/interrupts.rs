@@ -1,6 +1,20 @@
 use super::*;
 #[allow(unused_imports)]
-use crate::ReviewFixMode;
+use crate::config;
+#[allow(unused_imports)]
+use crate::data::ChatSession;
+#[allow(unused_imports)]
+use crate::memory;
+#[allow(unused_imports)]
+use crate::model::ModelProvider;
+#[allow(unused_imports)]
+use crate::provider_bridge::{
+    autonomous_provider_overrides, call_provider_cli_stream_with_overrides,
+};
+#[allow(unused_imports)]
+use crate::{
+    AutonomousExecutionEnvironment, AutonomousWorkflowMode, ReviewFixMode, ReviewScope, TurnPolicy,
+};
 #[allow(unused_imports)]
 use anyhow::{Context, Result};
 #[allow(unused_imports)]
@@ -30,6 +44,7 @@ use std::thread;
 use std::time::Duration;
 #[allow(unused_imports)]
 use uuid::Uuid;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum InterruptKind {
@@ -40,6 +55,7 @@ pub enum InterruptKind {
     CouncilUserReply,
     ManualPolicyDecision,
 }
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum InterruptStatus {
@@ -48,11 +64,13 @@ pub enum InterruptStatus {
     Expired,
     Canceled,
 }
+
 impl Default for InterruptStatus {
     fn default() -> Self {
         Self::Open
     }
 }
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum InterruptResolution {
@@ -61,6 +79,7 @@ pub enum InterruptResolution {
     EditedPayload { value: serde_json::Value },
     Deferred { note: String },
 }
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CoordinationInterrupt {
     pub interrupt_id: String,
@@ -82,18 +101,22 @@ pub struct CoordinationInterrupt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution: Option<InterruptResolution>,
 }
+
 fn interrupts_dir(run_id: &str) -> PathBuf {
     coordination_root_dir().join(run_id).join("interrupts")
 }
+
 fn interrupt_path(run_id: &str, interrupt_id: &str) -> PathBuf {
     interrupts_dir(run_id).join(format!("{interrupt_id}.json"))
 }
+
 fn interrupt_subject_id(interrupt: &CoordinationInterrupt) -> Option<&str> {
     interrupt
         .task_id
         .as_deref()
         .or(interrupt.council_entry_id.as_deref())
 }
+
 fn interrupt_kind_label(kind: &InterruptKind) -> &'static str {
     match kind {
         InterruptKind::ReviewApproval => "review_approval",
@@ -104,6 +127,7 @@ fn interrupt_kind_label(kind: &InterruptKind) -> &'static str {
         InterruptKind::ManualPolicyDecision => "manual_policy_decision",
     }
 }
+
 fn interrupt_resolution_label(resolution: &InterruptResolution) -> &'static str {
     match resolution {
         InterruptResolution::Approved { .. } => "approved",
@@ -112,6 +136,7 @@ fn interrupt_resolution_label(resolution: &InterruptResolution) -> &'static str 
         InterruptResolution::Deferred { .. } => "deferred",
     }
 }
+
 fn append_interrupt_event(
     interrupt: &CoordinationInterrupt,
     event_type: &str,
@@ -124,6 +149,7 @@ fn append_interrupt_event(
         message,
     )
 }
+
 pub fn create_interrupt(interrupt: &CoordinationInterrupt) -> Result<()> {
     let dir = interrupts_dir(&interrupt.run_id);
     fs::create_dir_all(&dir)
@@ -143,12 +169,14 @@ pub fn create_interrupt(interrupt: &CoordinationInterrupt) -> Result<()> {
     )?;
     Ok(())
 }
+
 pub fn load_interrupt(run_id: &str, interrupt_id: &str) -> Result<CoordinationInterrupt> {
     let path = interrupt_path(run_id, interrupt_id);
     let raw = fs::read_to_string(&path)
         .with_context(|| format!("failed to read interrupt {}", path.display()))?;
     serde_json::from_str(&raw).context("invalid interrupt JSON")
 }
+
 pub fn load_interrupts(run_id: &str) -> Vec<CoordinationInterrupt> {
     let dir = interrupts_dir(run_id);
     let entries = match fs::read_dir(&dir) {
@@ -170,11 +198,39 @@ pub fn load_interrupts(run_id: &str) -> Vec<CoordinationInterrupt> {
     interrupts.sort_by(|a, b| a.created_at.cmp(&b.created_at));
     interrupts
 }
+
 pub fn has_open_interrupts(run_id: &str) -> bool {
     load_interrupts(run_id)
         .iter()
         .any(|i| i.status == InterruptStatus::Open)
 }
+
+pub fn resolve_interrupt(
+    run_id: &str,
+    interrupt_id: &str,
+    resolution: InterruptResolution,
+) -> Result<CoordinationInterrupt> {
+    let mut interrupt = load_interrupt(run_id, interrupt_id)?;
+    if interrupt.status != InterruptStatus::Open {
+        anyhow::bail!("interrupt {} is not open", interrupt_id);
+    }
+    apply_interrupt_resolution_side_effects(&interrupt, &resolution)?;
+    interrupt.status = InterruptStatus::Resolved;
+    interrupt.resolved_at = Some(Utc::now());
+    interrupt.resolution = Some(resolution.clone());
+    write_json_atomic(&interrupt_path(run_id, interrupt_id), &interrupt)?;
+    append_interrupt_event(
+        &interrupt,
+        "interrupt_resolved",
+        &format!(
+            "Resolved {} interrupt as {}.",
+            interrupt_kind_label(&interrupt.kind),
+            interrupt_resolution_label(&resolution)
+        ),
+    )?;
+    Ok(interrupt)
+}
+
 pub fn create_review_approval_interrupt(
     run_id: &str,
     task_id: &str,
@@ -199,6 +255,7 @@ pub fn create_review_approval_interrupt(
     create_interrupt(&interrupt)?;
     Ok(interrupt)
 }
+
 pub fn maybe_create_review_approval_interrupt(
     run_id: &str,
     task: &CoordinationTask,
@@ -235,6 +292,7 @@ pub fn maybe_create_review_approval_interrupt(
         create_review_approval_interrupt(run_id, &task.task_id, &title, &prompt, payload)?;
     Ok(Some(interrupt))
 }
+
 pub fn create_council_user_reply_interrupt(
     run_id: &str,
     council_entry_id: &str,
@@ -257,6 +315,27 @@ pub fn create_council_user_reply_interrupt(
     create_interrupt(&interrupt)?;
     Ok(interrupt)
 }
+
+fn apply_interrupt_resolution_side_effects(
+    interrupt: &CoordinationInterrupt,
+    resolution: &InterruptResolution,
+) -> Result<()> {
+    match interrupt.kind {
+        InterruptKind::ReviewApproval => apply_review_approval_resolution(
+            &interrupt.run_id,
+            interrupt.task_id.as_deref(),
+            resolution,
+        ),
+        InterruptKind::CouncilUserReply => {
+            apply_council_user_reply_resolution(&interrupt.run_id, resolution)
+        }
+        InterruptKind::ToolApproval
+        | InterruptKind::MissingInput
+        | InterruptKind::BudgetExceeded
+        | InterruptKind::ManualPolicyDecision => Ok(()),
+    }
+}
+
 fn apply_review_approval_resolution(
     run_id: &str,
     review_task_id: Option<&str>,
@@ -278,6 +357,7 @@ fn apply_review_approval_resolution(
         ),
     }
 }
+
 fn fail_apply_tasks_for_review_resolution(
     run_id: &str,
     review_task_id: Option<&str>,
@@ -339,6 +419,18 @@ fn fail_apply_tasks_for_review_resolution(
     }
     Ok(())
 }
+
+fn apply_council_user_reply_resolution(
+    run_id: &str,
+    resolution: &InterruptResolution,
+) -> Result<()> {
+    let reply = council_user_reply_text(resolution);
+    if reply.trim().is_empty() {
+        anyhow::bail!("council user reply interrupt resolution requires non-empty content");
+    }
+    super::council::add_council_user_interjection(run_id, &reply)
+}
+
 fn council_user_reply_text(resolution: &InterruptResolution) -> String {
     match resolution {
         InterruptResolution::Approved { note } => {
@@ -365,6 +457,7 @@ fn council_user_reply_text(resolution: &InterruptResolution) -> String {
         InterruptResolution::EditedPayload { value } => interrupt_resolution_payload_text(value),
     }
 }
+
 fn interrupt_resolution_payload_text(value: &serde_json::Value) -> String {
     if let Some(text) = value.as_str() {
         return text.trim().to_string();
