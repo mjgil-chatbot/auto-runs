@@ -4,16 +4,19 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc};
+
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use rust_debug::tracing::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
 use crate::model::ModelProvider;
 use crate::provider_bridge::{
     autonomous_provider_overrides_with_execution, call_provider_cli_stream_with_overrides,
 };
 use crate::{AutonomousExecutionEnvironment, TurnPolicy};
+
 mod parsing;
 mod parsing_actions;
 mod runtime;
@@ -21,18 +24,26 @@ mod runtime_support;
 mod session;
 #[cfg(test)]
 mod tests;
+
+pub use runtime::{
+    add_council_user_interjection, drive_council_turn, load_council_ledger, load_council_run,
+};
 pub(crate) use session::make_council_provider_session;
+
 /// Number of turns without progress before issuing a soft nudge to council members.
 /// After 3 turns, the council may be stuck in circular discussion.
 const SOFT_STALL_TURNS: u32 = 3;
+
 /// Number of turns without progress before issuing a firm nudge with explicit directives.
 /// After 6 turns, stronger intervention is needed.
 const FIRM_STALL_TURNS: u32 = 6;
+
 /// Number of turns without progress before terminating the council run as failed.
 /// After 9 turns, the council is unlikely to make progress autonomously.
 const TERMINAL_STALL_TURNS: u32 = 9;
 const STALE_CLAIM_TTL_SECS: i64 = 180;
 const SURVEY_ARTIFACT_ID: &str = "council-survey";
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CouncilEntry {
     pub entry_id: String,
@@ -47,6 +58,7 @@ pub struct CouncilEntry {
     #[serde(default)]
     pub diffs: Vec<DiffSummary>,
 }
+
 impl CouncilEntry {
     fn new(speaker: CouncilSpeaker, kind: CouncilEntryKind, content: impl Into<String>) -> Self {
         Self {
@@ -59,15 +71,17 @@ impl CouncilEntry {
             claims: Vec::new(),
             diffs: Vec::new(),
         }
-    }}
-impl CouncilEntry {
+    }
+
     pub fn speaker_label(&self) -> &'static str {
         self.speaker.label()
-    }}
-impl CouncilEntry {
+    }
+
     pub fn kind_label(&self) -> &'static str {
         self.kind.label()
-    }}
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum CouncilSpeaker {
@@ -79,6 +93,7 @@ pub enum CouncilSpeaker {
     Gemini,
     User,
 }
+
 impl CouncilSpeaker {
     const MODEL_ORDER: [Self; 5] = [
         Self::Claude,
@@ -86,8 +101,8 @@ impl CouncilSpeaker {
         Self::Minimax,
         Self::Qwen,
         Self::Gemini,
-    ];}
-impl CouncilSpeaker {
+    ];
+
     pub fn label(&self) -> &'static str {
         match self {
             Self::System => "System",
@@ -98,8 +113,8 @@ impl CouncilSpeaker {
             Self::Gemini => "Gemini",
             Self::User => "User",
         }
-    }}
-impl CouncilSpeaker {
+    }
+
     pub fn mention_name(&self) -> &'static str {
         match self {
             Self::System => "system",
@@ -110,15 +125,15 @@ impl CouncilSpeaker {
             Self::Gemini => "gemini",
             Self::User => "user",
         }
-    }}
-impl CouncilSpeaker {
+    }
+
     fn is_model(&self) -> bool {
         matches!(
             self,
             Self::Claude | Self::Codex | Self::Minimax | Self::Qwen | Self::Gemini
         )
-    }}
-impl CouncilSpeaker {
+    }
+
     fn model_provider(&self) -> Option<ModelProvider> {
         match self {
             Self::Claude => Some(ModelProvider::Claude),
@@ -128,8 +143,8 @@ impl CouncilSpeaker {
             Self::Gemini => Some(ModelProvider::Gemini),
             Self::System | Self::User => None,
         }
-    }}
-impl CouncilSpeaker {
+    }
+
     fn from_name(name: &str) -> Option<Self> {
         match name
             .trim()
@@ -146,7 +161,9 @@ impl CouncilSpeaker {
             "user" => Some(Self::User),
             _ => None,
         }
-    }}
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CouncilEntryKind {
@@ -170,6 +187,7 @@ pub enum CouncilEntryKind {
     HandoffAccepted,
     UserInputRequested,
 }
+
 impl CouncilEntryKind {
     fn label(&self) -> &'static str {
         match self {
@@ -193,18 +211,22 @@ impl CouncilEntryKind {
             Self::HandoffAccepted => "handoff_accepted",
             Self::UserInputRequested => "user_input_requested",
         }
-    }}
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct WriteClaim {
     pub scope: String,
     pub claimed_by: CouncilSpeaker,
     pub claimed_at: DateTime<Utc>,
 }
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaimRevocationReason {
     StaleTimeout,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RevokedClaim {
     pub scope: String,
@@ -212,6 +234,7 @@ pub struct RevokedClaim {
     pub revoked_at: DateTime<Utc>,
     pub reason: ClaimRevocationReason,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DiffSummary {
     pub file: String,
@@ -219,6 +242,7 @@ pub struct DiffSummary {
     pub lines_removed: usize,
     pub description: String,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CouncilRun {
     pub run_id: String,
@@ -248,6 +272,7 @@ pub struct CouncilRun {
     #[serde(default)]
     pub termination_policy: CouncilTerminationPolicy,
 }
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CouncilRunStatus {
@@ -259,17 +284,20 @@ pub enum CouncilRunStatus {
     Failed,
     Canceled,
 }
+
 #[derive(Clone, Debug)]
 pub(super) struct ParsedWorkReport {
     pub(super) summary: String,
     pub(super) changed_files: Vec<String>,
     pub(super) diffs: Vec<DiffSummary>,
 }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum StallAction {
     SoftNudge,
     FirmNudge,
 }
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "action")]
 pub enum CouncilAction {
@@ -298,6 +326,7 @@ pub enum CouncilAction {
         prompt: String,
     },
 }
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CouncilTerminationPolicy {
     #[serde(default)]
@@ -305,6 +334,7 @@ pub struct CouncilTerminationPolicy {
     #[serde(default)]
     pub all: Vec<TerminationCondition>,
 }
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminationCondition {
@@ -314,11 +344,13 @@ pub enum TerminationCondition {
     BudgetExceeded,
     UserStop,
 }
+
 impl Default for CouncilTerminationPolicy {
     fn default() -> Self {
         Self::for_max_turns(40)
     }
 }
+
 impl CouncilTerminationPolicy {
     pub fn for_max_turns(max_turns: u32) -> Self {
         Self {
@@ -330,4 +362,5 @@ impl CouncilTerminationPolicy {
             ],
             all: vec![TerminationCondition::AllModelsVotedComplete],
         }
-    }}
+    }
+}

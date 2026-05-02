@@ -1,3 +1,145 @@
+pub fn upsert_run(input: UpsertRunInput) -> Result<CoordinationRunSnapshot> {
+    // Validate input at API boundary to catch configuration errors early
+    validate_run_input(&input)?;
+
+    fs::create_dir_all(coordination_root_dir())?;
+
+    if let Some(run_id) = input.existing_run_id.as_ref() {
+        if let Ok(mut existing) = load_run(run_id) {
+            // Reject configuration edits once tasks have been seeded — the
+            // existing task DAG carries cwd, provider, and workflow metadata
+            // from the original config and would become stale.
+            if !existing.task_ids.is_empty() {
+                anyhow::bail!(
+                    "cannot edit run {run_id}: tasks have already been seeded. \
+                     Cancel this run and create a new one instead."
+                );
+            }
+            let design_doc_path = if input.design_doc_path.trim().is_empty()
+                || crate::is_generated_design_doc_path(&input.design_doc_path)
+            {
+                crate::default_design_doc_path_for_run(&input.workflow_mode, run_id)
+            } else {
+                input.design_doc_path.trim().to_string()
+            };
+            existing.goal = input.goal;
+            existing.workspace_path = input.workspace_path;
+            existing.execution_environment = input.execution_environment;
+            existing.runsc_workspace_includes = input.runsc_workspace_includes;
+            existing.workflow_mode = input.workflow_mode;
+            existing.design_doc_path = design_doc_path;
+            existing.completion_criteria = input.completion_criteria;
+            existing.max_iterations = input.max_iterations.max(1);
+            existing.updated_at = Utc::now();
+            existing.max_agents = normalized_max_agents(&existing.workflow_mode, input.max_agents);
+            existing.allow_write_tasks = input.allow_write_tasks;
+            existing.require_review_before_apply = input.require_review_before_apply;
+            existing.auto_retry_failed_tasks = input.auto_retry_failed_tasks;
+            existing.notes = input.notes;
+            existing.review_scope = input.review_scope;
+            existing.review_dimensions = input.review_dimensions;
+            existing.review_fix_mode = input.review_fix_mode;
+            existing.council_turn_policy = input.council_turn_policy;
+            existing.council_max_turns = input.council_max_turns;
+            prepare_perf_workspace(&mut existing)?;
+            prepare_github_branch_fix_workspace(&mut existing)?;
+            reset_autonomous_runsc_workspace(run_id)?;
+            ensure_workspace_provider_capability_registry(&existing)?;
+            let _ = ensure_autonomous_runsc_workspace(&existing)?;
+            write_json_atomic(&run_path(run_id), &existing)?;
+            append_event(
+                run_id,
+                "run_updated",
+                None,
+                "Updated autonomous coordination run configuration.",
+            )?;
+            return load_run_snapshot(run_id);
+        }
+    }
+
+    let run_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    let design_doc_path = if input.design_doc_path.trim().is_empty()
+        || crate::is_generated_design_doc_path(&input.design_doc_path)
+    {
+        crate::default_design_doc_path_for_run(&input.workflow_mode, &run_id)
+    } else {
+        input.design_doc_path.trim().to_string()
+    };
+    let max_agents = normalized_max_agents(&input.workflow_mode, input.max_agents);
+    // Normalize provider to lowercase for consistent matching
+    let normalized_provider = input.provider.trim().to_lowercase();
+    let mut run = CoordinationRun {
+        run_id: run_id.clone(),
+        root_chat_id: input.root_chat_id,
+        workspace_path: input.workspace_path.clone(),
+        execution_environment: input.execution_environment,
+        runsc_workspace_includes: input.runsc_workspace_includes,
+        provider: normalized_provider,
+        goal: input.goal.clone(),
+        workflow_mode: input.workflow_mode,
+        design_doc_path,
+        completion_criteria: input.completion_criteria,
+        max_iterations: input.max_iterations.max(1),
+        status: CoordinationRunStatus::Active,
+        created_at: now,
+        updated_at: now,
+        created_by_instance: input.created_by_instance,
+        max_agents,
+        allow_write_tasks: input.allow_write_tasks,
+        require_review_before_apply: input.require_review_before_apply,
+        auto_retry_failed_tasks: input.auto_retry_failed_tasks,
+        notes: input.notes,
+        review_scope: input.review_scope,
+        review_dimensions: input.review_dimensions,
+        review_fix_mode: input.review_fix_mode,
+        council_turn_policy: input.council_turn_policy,
+        council_max_turns: input.council_max_turns,
+        provider_cooldowns: BTreeMap::new(),
+        task_ids: Vec::new(),
+       processed_mutation_batch_ids: BTreeSet::new(),
+    };
+    prepare_perf_workspace(&mut run)?;
+    prepare_github_branch_fix_workspace(&mut run)?;
+
+    fs::create_dir_all(tasks_dir(&run_id))?;
+    fs::create_dir_all(claims_dir(&run_id))?;
+    fs::create_dir_all(artifacts_dir(&run_id))?;
+
+    // Council mode: create the council-specific on-disk layout instead of task DAG.
+    if run.workflow_mode == AutonomousWorkflowMode::FreeformCouncil {
+        seed_council_run(&run)?;
+    }
+
+    ensure_workspace_provider_capability_registry(&run)?;
+    let _ = ensure_autonomous_runsc_workspace(&run)?;
+    let tasks = seed_initial_tasks(&run);
+    run.task_ids = tasks.iter().map(|task| task.task_id.clone()).collect();
+
+    write_json_atomic(&run_path(&run_id), &run)?;
+    index_run(&run);
+    for task in &tasks {
+        write_json_atomic(&task_path(&run_id, &task.task_id), task)?;
+        index_task(task);
+    }
+    refresh_lightweight_status_projection(&run_id)?;
+    if run.workflow_mode == AutonomousWorkflowMode::CodeReview {
+        persist_seed_code_review_metadata(&run, &tasks)?;
+    }
+    append_event(
+        &run_id,
+        "run_created",
+        None,
+        &if run.workflow_mode == AutonomousWorkflowMode::FreeformCouncil {
+            "Created autonomous coordination run (Freeform Council).".to_string()
+        } else {
+            "Created autonomous coordination run.".to_string()
+        },
+    )?;
+
+    load_run_snapshot(&run_id)
+}
+
 pub fn ensure_workspace_provider_capability_registry(run: &CoordinationRun) -> Result<()> {
     if run.workflow_mode != AutonomousWorkflowMode::DesignConsensus {
         return Ok(());
@@ -23,6 +165,7 @@ pub fn ensure_workspace_provider_capability_registry(run: &CoordinationRun) -> R
         .with_context(|| format!("failed to write {}", target_path.display()))?;
     Ok(())
 }
+
 pub(crate) fn persist_selected_tasks(
     run_id: &str,
     tasks: &[CoordinationTask],
@@ -37,6 +180,7 @@ pub(crate) fn persist_selected_tasks(
     }
     Ok(())
 }
+
 pub fn load_run_snapshot(run_id: &str) -> Result<CoordinationRunSnapshot> {
     reconcile_run_state(run_id)?;
     refresh_claim_state(run_id)?;
@@ -162,6 +306,64 @@ pub fn load_run_snapshot(run_id: &str) -> Result<CoordinationRunSnapshot> {
     }
     Ok(CoordinationRunSnapshot { run, tasks })
 }
+
+pub fn stop_run(run_id: &str, reason: &str) -> Result<CoordinationRunSnapshot> {
+    refresh_claim_state(run_id)?;
+    let mut run = load_run(run_id)?;
+    let mut tasks = load_tasks(run_id)?;
+    let now = Utc::now();
+    let worker_pids_to_stop = collect_claim_worker_pids_for_stop(run_id);
+
+    run.status = CoordinationRunStatus::Canceled;
+    run.updated_at = now;
+    write_json_atomic(&run_path(run_id), &run)?;
+    index_run(&run);
+
+    for task in tasks.iter_mut() {
+        if matches!(
+            task.status,
+            CoordinationTaskStatus::Completed
+                | CoordinationTaskStatus::Failed
+                | CoordinationTaskStatus::Canceled
+        ) {
+            continue;
+        }
+
+        task.status = CoordinationTaskStatus::Canceled;
+        task.claimed_by = None;
+        task.artifact_summary = Some(reason.to_string());
+        task.max_attempts = task.attempt_count.max(1);
+        task.updated_at = now;
+        write_json_atomic(&task_path(run_id, &task.task_id), task)?;
+        append_event(
+            run_id,
+            "task_canceled",
+            Some(&task.task_id),
+            &format!("Canceled task during run stop: {}", task.title),
+        )?;
+    }
+
+    if let Ok(entries) = fs::read_dir(claims_dir(run_id)) {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    stop_detached_workers(&worker_pids_to_stop);
+    if let Err(err) = cleanup_perf_workspace(&run) {
+        warn!(
+            run_id = %run.run_id,
+            error = %err,
+            "failed to clean disposable perf worktree while stopping run"
+        );
+    }
+
+    append_event(run_id, "run_canceled", None, reason)?;
+    Ok(CoordinationRunSnapshot { run, tasks })
+}
+
 pub fn update_run_max_agents(run_id: &str, max_agents: u32) -> Result<()> {
     let mut run = load_run(run_id)?;
     let clamped = if matches!(
@@ -179,6 +381,7 @@ pub fn update_run_max_agents(run_id: &str, max_agents: u32) -> Result<()> {
     }
     Ok(())
 }
+
 fn normalized_max_agents(workflow_mode: &AutonomousWorkflowMode, max_agents: u32) -> u32 {
     if matches!(
         workflow_mode,
@@ -189,6 +392,11 @@ fn normalized_max_agents(workflow_mode: &AutonomousWorkflowMode, max_agents: u32
         max_agents.max(1)
     }
 }
+
+pub fn restart_failed_tasks(run_id: &str) -> Result<CoordinationRunSnapshot> {
+    restart_failed_tasks_with_mode(run_id, RestartMode::Manual)
+}
+
 pub(crate) fn restart_failed_tasks_with_mode(
     run_id: &str,
     restart_mode: RestartMode,
@@ -196,6 +404,7 @@ pub(crate) fn restart_failed_tasks_with_mode(
     let _restart_lock = acquire_failed_run_restart_lock(run_id)?;
     restart_failed_tasks_with_mode_locked(run_id, restart_mode)
 }
+
 pub(crate) fn restart_failed_tasks_with_mode_locked(
     run_id: &str,
     restart_mode: RestartMode,
@@ -350,6 +559,93 @@ pub(crate) fn restart_failed_tasks_with_mode_locked(
     complete_mutation_batch(&mut mutation)?;
     load_run_snapshot(run_id)
 }
+
+pub fn mark_task_failed_for_restart(
+    run_id: &str,
+    task_id: &str,
+    reason: &str,
+) -> Result<CoordinationRunSnapshot> {
+    refresh_claim_state(run_id)?;
+    let mut run = load_run(run_id)?;
+    let mut task = load_task(run_id, task_id)?;
+    if task.status != CoordinationTaskStatus::Completed {
+        anyhow::bail!(
+            "task {} for run {} is not completed and cannot be marked failed for restart",
+            task_id,
+            run_id
+        );
+    }
+    let now = Utc::now();
+    task.status = CoordinationTaskStatus::Failed;
+    task.claimed_by = None;
+    task.updated_at = now;
+    if task.artifact_summary.is_none() {
+        task.artifact_summary = Some("Manually marked failed before restart.".to_string());
+    }
+    write_json_atomic(&task_path(run_id, task_id), &task)?;
+    index_task(&task);
+    run.status = CoordinationRunStatus::Failed;
+    run.auto_retry_failed_tasks = false;
+    run.updated_at = now;
+    write_json_atomic(&run_path(run_id), &run)?;
+    index_run(&run);
+    append_event(
+        run_id,
+        "task_marked_failed",
+        Some(task_id),
+        &format!(
+            "Marked task failed before restart: {}. {}",
+            task.title,
+            reason.trim()
+        ),
+    )?;
+    load_run_snapshot(run_id)
+}
+
+pub fn set_task_assigned_provider(run_id: &str, task_id: &str, provider: &str) -> Result<()> {
+    refresh_claim_state(run_id)?;
+    let canonical_provider = normalize_provider_name(Some(provider))
+        .with_context(|| format!("unknown provider '{provider}'"))?;
+    let mut run = load_run(run_id)?;
+    let mut task = load_task(run_id, task_id)?;
+    if matches!(
+        task.status,
+        CoordinationTaskStatus::Running
+            | CoordinationTaskStatus::Claiming
+            | CoordinationTaskStatus::ArtifactReady
+    ) {
+        anyhow::bail!(
+            "task {} for run {} is currently active and cannot be reassigned",
+            task_id,
+            run_id
+        );
+    }
+    if task.assigned_provider.as_deref() == Some(canonical_provider.as_str()) {
+        return Ok(());
+    }
+
+    let now = Utc::now();
+    task.assigned_provider = Some(canonical_provider.clone());
+    task.updated_at = now;
+    write_json_atomic(&task_path(run_id, task_id), &task)?;
+    index_task(&task);
+
+    run.updated_at = now;
+    write_json_atomic(&run_path(run_id), &run)?;
+    index_run(&run);
+
+    append_event(
+        run_id,
+        "task_provider_reassigned",
+        Some(task_id),
+        &format!(
+            "Updated assigned provider for {} to {}.",
+            task.title, canonical_provider
+        ),
+    )?;
+    Ok(())
+}
+
 /// Find the most recent coordination run whose `root_chat_id` matches the given session ID.
 /// Returns the run_id if found.
 pub fn find_latest_run_for_session(session_id: &str) -> Option<String> {
@@ -378,3 +674,88 @@ pub fn find_latest_run_for_session(session_id: &str) -> Option<String> {
     }
     best.map(|(_, id)| id)
 }
+
+pub fn drive_run_for_instance(run_id: &str, instance_pid: u32, provider: &str) -> Result<bool> {
+    reconcile_run_state(run_id)?;
+    refresh_claim_state(run_id)?;
+    let run = load_run(run_id)?;
+    if matches!(
+        run.status,
+        CoordinationRunStatus::Completed
+            | CoordinationRunStatus::Failed
+            | CoordinationRunStatus::Canceled
+    ) {
+        return Ok(false);
+    }
+    if has_open_interrupts(run_id) {
+        return Ok(false);
+    }
+    // Council runs use a separate ledger-based driver instead of the task DAG.
+    if run.workflow_mode == AutonomousWorkflowMode::FreeformCouncil {
+        return council::drive_council_turn(run_id, instance_pid);
+    }
+
+    if count_active_claims(run_id)? >= run.max_agents as usize {
+        return Ok(false);
+    }
+
+    // Safety net: if no tasks are queued but some are blocked, try unblocking.
+    // This recovers from cases where load_run_snapshot (the normal unblock path)
+    // errored silently, leaving tasks stuck in blocked state.
+    let mut tasks = load_tasks(run_id)?;
+    let has_queued = tasks
+        .iter()
+        .any(|t| t.status == CoordinationTaskStatus::Queued);
+    if !has_queued {
+        let unblocked_task_ids = unblock_runnable_task_ids(&mut tasks);
+        if !unblocked_task_ids.is_empty() {
+            eprintln!(
+                "drive_run_for_instance: recovered stalled run {} — unblocked tasks via safety net",
+                run_id
+            );
+            persist_selected_tasks(run_id, &tasks, &unblocked_task_ids)?;
+        }
+    }
+
+    let Some(task) = claim_next_runnable_task(run_id, instance_pid, provider)? else {
+        return Ok(false);
+    };
+
+    if is_provider_backed(&task) {
+        if let Err(err) = spawn_provider_task_process(&task, provider, instance_pid) {
+            handle_launch_failure_after_claim(&task.run_id, &task.task_id, instance_pid, &err)?;
+            return Err(err);
+        }
+        return Ok(true);
+    }
+
+    let artifact = match execute_builtin_task(&task) {
+        Ok(artifact) => artifact,
+        Err(err) => {
+            if let Err(fail_err) = fail_task(run_id, &task.task_id, instance_pid, &err.to_string())
+            {
+                warn!(
+                    run_id = %task.run_id,
+                    task_id = %task.task_id,
+                    error = %fail_err,
+                    "failed to mark builtin task as failed after execution error"
+                );
+            }
+            return Err(err);
+        }
+    };
+    if let Err(err) = complete_task(run_id, &task.task_id, instance_pid, artifact) {
+        if let Err(fail_err) = fail_task(run_id, &task.task_id, instance_pid, &err.to_string()) {
+            warn!(
+                run_id = %task.run_id,
+                task_id = %task.task_id,
+                error = %fail_err,
+                "failed to mark builtin task as failed after completion error"
+            );
+        }
+        return Err(err);
+    }
+    Ok(true)
+}
+
+// validate_run_input is defined in run_lifecycle_retry.rs

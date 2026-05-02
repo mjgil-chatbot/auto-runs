@@ -1,6 +1,292 @@
 use super::parsing_actions::*;
 use super::*;
 use crate::coordination;
+
+pub(super) fn revoke_stale_claims(
+    council: &mut CouncilRun,
+    now: DateTime<Utc>,
+) -> Vec<CouncilEntry> {
+    let ttl = chrono::Duration::seconds(STALE_CLAIM_TTL_SECS);
+    let mut stale = Vec::new();
+    let mut still_active = Vec::with_capacity(council.active_claims.len());
+
+    for claim in council.active_claims.drain(..) {
+        if now.signed_duration_since(claim.claimed_at) >= ttl {
+            stale.push(claim);
+        } else {
+            still_active.push(claim);
+        }
+    }
+    council.active_claims = still_active;
+
+    stale.into_iter()
+        .map(|claim| {
+            if !council.revoked_claims.iter().any(|revoked| {
+                revoked.scope == claim.scope
+                    && revoked.claimed_by == claim.claimed_by
+                    && revoked.reason == ClaimRevocationReason::StaleTimeout
+            }) {
+                council.revoked_claims.push(RevokedClaim {
+                    scope: claim.scope.clone(),
+                    claimed_by: claim.claimed_by,
+                    revoked_at: now,
+                    reason: ClaimRevocationReason::StaleTimeout,
+                });
+            }
+
+            let mut entry = CouncilEntry::new(
+                CouncilSpeaker::System,
+                CouncilEntryKind::ClaimRevoked,
+                format!(
+                    "Claim revoked as stale after {}s: {} -> {}. {} may not reclaim this scope again in this run.",
+                    STALE_CLAIM_TTL_SECS,
+                    claim.claimed_by.label(),
+                    claim.scope,
+                    claim.claimed_by.label(),
+                ),
+            );
+            entry.claims = vec![claim];
+            entry
+        })
+        .collect()
+}
+
+pub(super) fn parse_and_validate_council_response(
+    run_id: &str,
+    council: &mut CouncilRun,
+    speaker: CouncilSpeaker,
+    response: &str,
+    instance_pid: u32,
+) -> Result<Vec<CouncilEntry>> {
+    let mut entries = Vec::new();
+    let mut made_progress = false;
+    // Validated work resets the stall counter. A granted claim also resets it because the
+    // claiming model needs (num_models - 1) more round-robin turns before it can file its
+    // work report — without this, the stall fires before the model gets back. Votes alone
+    // do NOT reset the counter, to prevent a vote loop from masking a stuck council.
+    let mut real_progress = false;
+    let mut claim_granted = false;
+    let clean_content = strip_action_markers(response);
+    let mentions = extract_mentions(response);
+
+    let existing_ledger = super::runtime::load_council_ledger(run_id).unwrap_or_default();
+    if pending_handoff_target(&existing_ledger) == Some(speaker) {
+        entries.push(CouncilEntry::new(
+            CouncilSpeaker::System,
+            CouncilEntryKind::HandoffAccepted,
+            format!("{} accepted handoff.", speaker.label()),
+        ));
+        made_progress = true;
+    }
+
+    if !clean_content.trim().is_empty() {
+        let mut discussion =
+            CouncilEntry::new(speaker, CouncilEntryKind::Discussion, clean_content.trim());
+        discussion.mentions = mentions.clone();
+        entries.push(discussion);
+    }
+
+    if !mentions.is_empty() && clean_content.contains('@') {
+        let mut delegation =
+            CouncilEntry::new(speaker, CouncilEntryKind::Delegation, clean_content.trim());
+        delegation.mentions = mentions.clone();
+        entries.push(delegation);
+    }
+
+    for scope in extract_claims(response) {
+        let claim = WriteClaim {
+            scope: scope.clone(),
+            claimed_by: speaker,
+            claimed_at: Utc::now(),
+        };
+        let mut request = CouncilEntry::new(
+            speaker,
+            CouncilEntryKind::ClaimRequest,
+            format!("Requesting write access to {}", scope),
+        );
+        request.claims = vec![claim.clone()];
+        request.mentions = mentions.clone();
+        entries.push(request);
+
+        match validate_claim_request(council, &scope, speaker) {
+            Ok(()) => {
+                if !council
+                    .active_claims
+                    .iter()
+                    .any(|active| active.claimed_by == speaker && active.scope == scope)
+                {
+                    council.active_claims.push(claim.clone());
+                }
+                let mut granted = CouncilEntry::new(
+                    CouncilSpeaker::System,
+                    CouncilEntryKind::ClaimGranted,
+                    format!("Claim granted: {} -> {}", speaker.label(), scope),
+                );
+                granted.claims = vec![claim];
+                entries.push(granted);
+                made_progress = true;
+                claim_granted = true;
+            }
+            Err(reason) => {
+                entries.push(CouncilEntry::new(
+                    CouncilSpeaker::System,
+                    CouncilEntryKind::ClaimRejected,
+                    format!("Claim rejected for {}: {}", scope, reason),
+                ));
+            }
+        }
+    }
+
+    for scope in extract_releases(response) {
+        let released = release_claim(council, speaker, &scope);
+        if released {
+            let mut entry = CouncilEntry::new(
+                CouncilSpeaker::System,
+                CouncilEntryKind::ReleaseScope,
+                format!("Scope released: {} <- {}", scope, speaker.label()),
+            );
+            entry.claims.push(WriteClaim {
+                scope,
+                claimed_by: speaker,
+                claimed_at: Utc::now(),
+            });
+            entries.push(entry);
+            made_progress = true;
+        } else {
+            entries.push(CouncilEntry::new(
+                CouncilSpeaker::System,
+                CouncilEntryKind::SystemNudge,
+                format!(
+                    "{} tried to release {}, but no matching active claim was found.",
+                    speaker.label(),
+                    scope
+                ),
+            ));
+        }
+    }
+
+    if let Some(work_report) = extract_work_report(response, &council.workspace_path, speaker) {
+        let mut report_entry = CouncilEntry::new(
+            speaker,
+            CouncilEntryKind::WorkReport,
+            work_report.summary.clone(),
+        );
+        report_entry.diffs = work_report.diffs.clone();
+        entries.push(report_entry);
+
+        let validation_errors = validate_work_report(council, speaker, &work_report.changed_files)?;
+        if validation_errors.is_empty() {
+            council.total_work_reports = council.total_work_reports.saturating_add(1);
+            store_work_artifact(run_id, council, speaker, &work_report, instance_pid)?;
+            entries.push(CouncilEntry::new(
+                CouncilSpeaker::System,
+                CouncilEntryKind::WorkValidated,
+                format!(
+                    "Work validated for {}: {} file(s) changed, within scope, no blocked stub markers.",
+                    speaker.label(),
+                    work_report.changed_files.len()
+                ),
+            ));
+            made_progress = true;
+            real_progress = true;
+        } else {
+            entries.push(CouncilEntry::new(
+                CouncilSpeaker::System,
+                CouncilEntryKind::WorkValidationFailed,
+                format!(
+                    "Work validation failed for {}: {}",
+                    speaker.label(),
+                    validation_errors.join("; ")
+                ),
+            ));
+        }
+    }
+
+    for handoff in extract_handoffs(response) {
+        if let Some(target) = CouncilSpeaker::from_name(&handoff.target).filter(|s| s.is_model()) {
+            let mut entry = CouncilEntry::new(
+                speaker,
+                CouncilEntryKind::HandoffRequested,
+                format!("Handoff to {}: {}", target.label(), handoff.reason.trim()),
+            );
+            entry.mentions = vec![target.mention_name().to_string()];
+            entries.push(entry);
+            made_progress = true;
+        }
+    }
+
+    for prompt in extract_user_requests(response) {
+        let entry_id = Uuid::new_v4().to_string();
+        let request_entry = CouncilEntry {
+            entry_id: entry_id.clone(),
+            at: Utc::now(),
+            speaker,
+            kind: CouncilEntryKind::UserInputRequested,
+            content: prompt.clone(),
+            mentions: vec!["user".to_string()],
+            claims: Vec::new(),
+            diffs: Vec::new(),
+        };
+        entries.push(request_entry);
+        if let Err(err) =
+            coordination::create_council_user_reply_interrupt(run_id, &entry_id, &prompt)
+        {
+            entries.push(CouncilEntry::new(
+                CouncilSpeaker::System,
+                CouncilEntryKind::SystemNudge,
+                format!("Failed to persist council user-reply interrupt: {err}"),
+            ));
+        }
+    }
+
+    if response.contains("[VOTE_COMPLETE]") {
+        let justification = extract_vote_justification(response, &clean_content);
+        if !council.votes_complete.contains(&speaker) {
+            council.votes_complete.push(speaker);
+            made_progress = true;
+        }
+        // Auto-release all claims held by this speaker when they vote complete.
+        // This prevents the deadlock where all models vote with active claims,
+        // causing verify_completion to fail due to non-empty active_claims,
+        // clearing all votes, and creating an infinite vote-verify-clear loop.
+        let released: Vec<String> = council
+            .active_claims
+            .iter()
+            .filter(|c| c.claimed_by == speaker)
+            .map(|c| c.scope.clone())
+            .collect();
+        for scope in &released {
+            release_claim(council, speaker, scope);
+        }
+        if !released.is_empty() {
+            for scope in &released {
+                entries.push(CouncilEntry::new(
+                    CouncilSpeaker::System,
+                    CouncilEntryKind::ReleaseScope,
+                    format!(
+                        "Scope auto-released on vote complete: {} <- {}",
+                        scope,
+                        speaker.label()
+                    ),
+                ));
+            }
+        }
+        entries.push(CouncilEntry::new(
+            speaker,
+            CouncilEntryKind::VoteComplete,
+            justification,
+        ));
+    }
+
+    if real_progress || claim_granted {
+        council.turns_since_progress = 0;
+    } else {
+        council.turns_since_progress = council.turns_since_progress.saturating_add(1);
+    }
+
+    Ok(entries)
+}
+
 pub(super) fn validate_claim_request(
     council: &CouncilRun,
     scope: &str,
@@ -44,6 +330,7 @@ pub(super) fn validate_claim_request(
 
     Ok(())
 }
+
 pub(super) fn release_claim(
     council: &mut CouncilRun,
     speaker: CouncilSpeaker,
@@ -55,6 +342,7 @@ pub(super) fn release_claim(
         .retain(|claim| !(claim.claimed_by == speaker && claim.scope == scope));
     before != council.active_claims.len()
 }
+
 fn validate_work_report(
     council: &CouncilRun,
     speaker: CouncilSpeaker,
@@ -134,9 +422,11 @@ fn validate_work_report(
 
     Ok(errors)
 }
+
 pub(super) fn contains_stub_markers(root: &Path, changed_file: &str) -> Result<bool> {
     crate::coordination::file_contains_stub_markers(root, changed_file)
 }
+
 pub(super) fn verify_completion(run_id: &str, council: &CouncilRun) -> Result<Vec<String>> {
     let mut issues = Vec::new();
 
@@ -196,6 +486,7 @@ pub(super) fn verify_completion(run_id: &str, council: &CouncilRun) -> Result<Ve
 
     Ok(issues)
 }
+
 fn store_work_artifact(
     run_id: &str,
     council: &CouncilRun,
@@ -247,6 +538,7 @@ fn store_work_artifact(
     )?;
     Ok(())
 }
+
 pub(super) fn extract_mentions(text: &str) -> Vec<String> {
     let mut mentions = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -268,12 +560,15 @@ pub(super) fn extract_mentions(text: &str) -> Vec<String> {
     }
     mentions
 }
+
 pub(super) fn extract_claims(text: &str) -> Vec<String> {
     extract_bracketed_values(text, "CLAIM")
 }
+
 pub(super) fn extract_releases(text: &str) -> Vec<String> {
     extract_bracketed_values(text, "RELEASE")
 }
+
 pub(super) fn extract_revoke_votes(text: &str) -> Vec<CouncilSpeaker> {
     extract_bracketed_values(text, "REVOKE_VOTE")
         .into_iter()
@@ -281,6 +576,7 @@ pub(super) fn extract_revoke_votes(text: &str) -> Vec<CouncilSpeaker> {
         .filter(|speaker| speaker.is_model())
         .collect()
 }
+
 fn extract_bracketed_values(text: &str, action: &str) -> Vec<String> {
     let mut values = Vec::new();
     let needle = format!("[{} ", action);
@@ -298,6 +594,7 @@ fn extract_bracketed_values(text: &str, action: &str) -> Vec<String> {
     }
     values
 }
+
 pub(super) fn extract_work_report(
     response: &str,
     workspace_path: &str,
@@ -389,9 +686,11 @@ pub(super) fn extract_work_report(
         diffs,
     })
 }
+
 fn normalize_candidate_path(root: &Path, candidate: &str) -> String {
     coordination::workspace_relative_path(root, candidate).unwrap_or_else(|| candidate.to_string())
 }
+
 fn parse_diff_summary_line(line: &str, root: &Path) -> Option<DiffSummary> {
     let parts: Vec<&str> = line.split('|').map(str::trim).collect();
     if parts.len() < 2 {
@@ -416,6 +715,7 @@ fn parse_diff_summary_line(line: &str, root: &Path) -> Option<DiffSummary> {
         description: description.to_string(),
     })
 }
+
 fn parse_diff_counts(segment: &str) -> (usize, usize) {
     let mut added = 0usize;
     let mut removed = 0usize;
@@ -432,6 +732,7 @@ fn parse_diff_counts(segment: &str) -> (usize, usize) {
     }
     (added, removed)
 }
+
 fn extract_changed_file_candidates(line: &str, root: &Path) -> Vec<String> {
     let trimmed = line.trim();
     let lower = trimmed.to_ascii_lowercase();
@@ -459,6 +760,7 @@ fn extract_changed_file_candidates(line: &str, root: &Path) -> Vec<String> {
         .filter_map(|value| clean_path_candidate(value, root))
         .collect()
 }
+
 fn clean_path_candidate(value: &str, root: &Path) -> Option<String> {
     let first = value
         .split_whitespace()
@@ -477,6 +779,7 @@ fn clean_path_candidate(value: &str, root: &Path) -> Option<String> {
     };
     exists.then(|| first.to_string())
 }
+
 pub(super) fn extract_vote_justification(response: &str, clean_content: &str) -> String {
     if let Some(idx) = response.find("[VOTE_COMPLETE]") {
         let after_marker = &response[idx + "[VOTE_COMPLETE]".len()..];
@@ -495,6 +798,7 @@ pub(super) fn extract_vote_justification(response: &str, clean_content: &str) ->
         "Speaker voted complete.".to_string()
     }
 }
+
 fn strip_protocol_markers_inline(text: &str) -> String {
     let mut result = text.to_string();
     for prefix in &["[CLAIM ", "[RELEASE "] {

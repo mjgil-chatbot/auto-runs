@@ -3,6 +3,7 @@ pub fn load_run(run_id: &str) -> Result<CoordinationRun> {
         .with_context(|| format!("failed to read run {}", run_id))?;
     serde_json::from_str(&raw).with_context(|| format!("failed to parse run {}", run_id))
 }
+
 pub fn load_global_provider_cooldowns() -> Result<BTreeMap<String, ProviderCooldown>> {
     let path = provider_cooldowns_path();
     let raw = match fs::read_to_string(&path) {
@@ -14,23 +15,27 @@ pub fn load_global_provider_cooldowns() -> Result<BTreeMap<String, ProviderCoold
     };
     serde_json::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
 }
+
 pub fn write_global_provider_cooldowns(
     cooldowns: &BTreeMap<String, ProviderCooldown>,
 ) -> Result<()> {
     write_json_atomic(&provider_cooldowns_path(), cooldowns)
 }
+
 pub fn load_task(run_id: &str, task_id: &str) -> Result<CoordinationTask> {
     let raw = fs::read_to_string(task_path(run_id, task_id))
         .with_context(|| format!("failed to read task {} for run {}", task_id, run_id))?;
     serde_json::from_str(&raw)
         .with_context(|| format!("failed to parse task {} for run {}", task_id, run_id))
 }
+
 pub fn load_claim(run_id: &str, task_id: &str) -> Result<TaskClaim> {
     let raw = fs::read_to_string(claim_path(run_id, task_id))
         .with_context(|| format!("failed to read claim {} for run {}", task_id, run_id))?;
     serde_json::from_str(&raw)
         .with_context(|| format!("failed to parse claim {} for run {}", task_id, run_id))
 }
+
 pub fn load_tasks(run_id: &str) -> Result<Vec<CoordinationTask>> {
     let mut tasks = Vec::new();
     let entries = match fs::read_dir(tasks_dir(run_id)) {
@@ -60,6 +65,24 @@ pub fn load_tasks(run_id: &str) -> Result<Vec<CoordinationTask>> {
     tasks.sort_by(|a, b| a.created_at.cmp(&b.created_at));
     Ok(tasks)
 }
+
+pub fn seed_initial_tasks(run: &CoordinationRun) -> Vec<CoordinationTask> {
+    match run.workflow_mode {
+        AutonomousWorkflowMode::DesignConsensus => seed_design_consensus_tasks(run),
+        AutonomousWorkflowMode::DesignImplementation => seed_design_implementation_tasks(run),
+        AutonomousWorkflowMode::LightweightImplementation => {
+            seed_lightweight_implementation_tasks(run)
+        }
+        AutonomousWorkflowMode::GithubBranchFix => seed_github_branch_fix_tasks(run),
+        AutonomousWorkflowMode::SingleProvider => seed_single_provider_tasks(run),
+        AutonomousWorkflowMode::RalphLoop => seed_ralph_loop_tasks(run),
+        // Council mode does not use the task DAG — it has its own ledger-based driver.
+        AutonomousWorkflowMode::FreeformCouncil => Vec::new(),
+        AutonomousWorkflowMode::CodeReview => seed_code_review_tasks(run),
+        AutonomousWorkflowMode::PerfHillClimber => seed_perf_hill_climber_tasks(run),
+    }
+}
+
 pub fn seed_single_provider_tasks(run: &CoordinationRun) -> Vec<CoordinationTask> {
     let goal = provider_prompt_text_for_run(run, &run.goal);
     let survey_id = Uuid::new_v4().to_string();
@@ -158,6 +181,7 @@ pub fn seed_single_provider_tasks(run: &CoordinationRun) -> Vec<CoordinationTask
 
     tasks
 }
+
 pub fn seed_ralph_loop_tasks(run: &CoordinationRun) -> Vec<CoordinationTask> {
     let goal = provider_prompt_text_for_run(run, &run.goal);
     // Create both template files before tasks run
@@ -267,6 +291,294 @@ pub fn seed_ralph_loop_tasks(run: &CoordinationRun) -> Vec<CoordinationTask> {
         verify_task,
     ]
 }
+
+pub fn seed_design_consensus_tasks(run: &CoordinationRun) -> Vec<CoordinationTask> {
+    let goal = provider_prompt_text_for_run(run, &run.goal);
+    let workspace_root = prompt_workspace_root_for_run(run);
+    let survey_id = Uuid::new_v4().to_string();
+    let converge_id = Uuid::new_v4().to_string();
+    let mut tasks = vec![make_task(
+        run,
+        &survey_id,
+        None,
+        CoordinationTaskKind::SurveyWorkspace,
+        None,
+        "Survey workspace".to_string(),
+        format!(
+            "Survey the workspace for context relevant to this autonomous goal: {}",
+            goal
+        ),
+        vec!["filesystem".to_string(), "search".to_string()],
+        vec!["**".to_string()],
+        Vec::new(),
+        Vec::new(),
+        CoordinationTaskStatus::Queued,
+    )];
+    let mut draft_ids = Vec::new();
+
+    for provider in resolve_design_draft_providers(run) {
+        let provider_label = provider_display_name(&provider);
+        let task_id = Uuid::new_v4().to_string();
+        draft_ids.push(task_id.clone());
+        let draft_doc_path = provider_draft_design_doc_path(run, &provider);
+        let base_prompt = format!(
+            "Inspect the workspace at {} and propose the best single design for this goal: {}.\n\nThere are multiple design docs already. Your job is to review the existing design material, identify the strongest path forward, and write one provider-specific proposal artifact in markdown.\n\nRequirements:\n- Focus on the repo state that actually exists today.\n- Call out which existing design ideas should be kept, changed, or discarded.\n- Optimize for an implementable plan, not a brainstorming list.\n- Include sections: Current State, Recommended Design, Rejected Alternatives, Implementation Slices, Risks.\n- If you discuss provider weaknesses, failed runs, or evaluation gaps, anchor that analysis to the current autonomous providers configured for this repo by reading `workflow-registry/providers.json`.\n- Do not design around failures of weaker, out-of-band, or otherwise unrelated models just because they are easier to fail.\n- Assume the canonical converged design doc will be written to `{}`.",
+            workspace_root, goal, run.design_doc_path
+        );
+        let mut task = make_task(
+            run,
+            &task_id,
+            Some(survey_id.clone()),
+            CoordinationTaskKind::DraftDesignDoc,
+            Some(provider.clone()),
+            format!("Draft provider design proposal with {}", provider_label),
+            apply_prompt_family(&provider, &base_prompt),
+            vec!["filesystem".to_string(), "search".to_string()],
+            vec!["**".to_string()],
+            Vec::new(),
+            vec![survey_id.clone()],
+            CoordinationTaskStatus::Blocked,
+        );
+        task.task_category = Some(TaskCategory::Design);
+        task.provider_hint = Some(provider.clone());
+
+        if seed_existing_design_draft_artifact(run, &mut task, &draft_doc_path) {
+            tasks.push(task);
+            continue;
+        }
+
+        tasks.push(task);
+    }
+
+    // Converge task: resolve provider via category routing
+    let converge_provider =
+        resolve_provider_for_category(run, &TaskCategory::Design, Some("claude"))
+            .unwrap_or_else(|| "claude".to_string());
+    let converge_base_prompt = format!(
+        "Synthesize the provider design proposal artifacts into a single canonical design doc for this goal: {}.\n\nReturn markdown only.\n\nRequirements:\n- Produce one final design doc suitable to implement immediately.\n- Resolve disagreements explicitly instead of listing incompatible options.\n- The design doc should target `{}` inside the workspace.\n- Include sections: Goal, Chosen Design, Why This Design, Detailed Plan, Implementation Order, Risks, Validation.\n- Any discussion of provider weaknesses, failed runs, or evaluation evidence must target the current autonomous providers configured for this repo, not weaker or unrelated external models.\n- Treat this output as the single source of truth for follow-on implementation planning.",
+        goal, run.design_doc_path
+    );
+    let mut converge_task = make_task(
+        run,
+        &converge_id,
+        Some(survey_id.clone()),
+        CoordinationTaskKind::ConvergeDesignDoc,
+        Some(converge_provider.clone()),
+        "Converge on one canonical design doc".to_string(),
+        apply_prompt_family(&converge_provider, &converge_base_prompt),
+        vec!["filesystem".to_string(), "search".to_string()],
+        vec!["artifacts/**".to_string(), "**".to_string()],
+        Vec::new(),
+        draft_ids.clone(),
+        CoordinationTaskStatus::Blocked,
+    );
+    converge_task.task_category = Some(TaskCategory::Design);
+    tasks.push(converge_task);
+
+    // DesignConsensus stops here — materialize the doc then done. No planning or implementation.
+    if run.allow_write_tasks {
+        let materialize_id = Uuid::new_v4().to_string();
+        let materialize_provider = "codex".to_string();
+        let materialize_base_prompt = format!(
+            "Use the converged design doc artifact and write the canonical design doc to `{}`.\n\nKeep the write limited to that file. If the file already exists, replace its contents so there is one canonical document to implement from.",
+            run.design_doc_path
+        );
+        let mut mat_task = make_task(
+            run,
+            &materialize_id,
+            Some(converge_id.clone()),
+            CoordinationTaskKind::MaterializeDesignDoc,
+            Some(materialize_provider.clone()),
+            "Write canonical design doc to the workspace".to_string(),
+            apply_prompt_family(&materialize_provider, &materialize_base_prompt),
+            vec!["filesystem".to_string(), "edit".to_string()],
+            vec!["**".to_string(), "artifacts/**".to_string()],
+            vec![run.design_doc_path.clone()],
+            vec![converge_id.clone()],
+            CoordinationTaskStatus::Blocked,
+        );
+        mat_task.task_category = Some(TaskCategory::DocWrite);
+        tasks.push(mat_task);
+    }
+
+    tasks
+}
+
+pub fn seed_existing_design_draft_artifact(
+    run: &CoordinationRun,
+    task: &mut CoordinationTask,
+    draft_doc_path: &str,
+) -> bool {
+    let absolute_path = workspace_path_for_run(run, draft_doc_path);
+    if !absolute_path.is_file() {
+        return false;
+    }
+
+    let Ok(body) = fs::read_to_string(&absolute_path) else {
+        return false;
+    };
+
+    let summary = format!(
+        "Reused existing provider draft design doc at `{}`.",
+        draft_doc_path
+    );
+    let artifact = TaskArtifact {
+        run_id: run.run_id.clone(),
+        task_id: task.task_id.clone(),
+        provider: task.assigned_provider.clone(),
+        task_category: task.task_category,
+        fallback_from: task.provider_hint.clone(),
+        summary: summary.clone(),
+        body: body.clone(),
+        completed_at: Utc::now(),
+        report: TaskExecutionReport {
+            outcome: CoordinationTaskOutcome::CompletedNoChange,
+            summary: summary.clone(),
+            details: body,
+            design_requirements_satisfied: vec![
+                "Reused existing provider draft design doc already present in the workspace."
+                    .to_string(),
+            ],
+            ..Default::default()
+        },
+    };
+
+    if fs::create_dir_all(artifact_dir(&run.run_id, &task.task_id)).is_err() {
+        return false;
+    }
+    if write_json_atomic(&artifact_result_path(&run.run_id, &task.task_id), &artifact).is_err() {
+        return false;
+    }
+    if fs::write(
+        artifact_notes_path(&run.run_id, &task.task_id),
+        &artifact.body,
+    )
+    .is_err()
+    {
+        return false;
+    }
+
+    task.status = CoordinationTaskStatus::Completed;
+    task.artifact_summary = Some(format!(
+        "{} [{}]",
+        artifact.summary,
+        artifact.report.outcome.as_str()
+    ));
+    task.updated_at = Utc::now();
+    true
+}
+
+/// Seeds the task DAG for DesignImplementation: takes an existing design doc and implements it.
+/// Skips design convergence — goes straight to survey → plan → execute → review → apply.
+pub fn seed_design_implementation_tasks(run: &CoordinationRun) -> Vec<CoordinationTask> {
+    let goal = provider_prompt_text_for_run(run, &run.goal);
+    let survey_id = Uuid::new_v4().to_string();
+    let plan_id = Uuid::new_v4().to_string();
+    let review_id = Uuid::new_v4().to_string();
+
+    let mut tasks = vec![make_task(
+        run,
+        &survey_id,
+        None,
+        CoordinationTaskKind::SurveyWorkspace,
+        None,
+        "Survey workspace".to_string(),
+        format!(
+            "Survey the workspace and read the canonical design doc at `{}` for context relevant to this implementation goal: {}",
+            run.design_doc_path, goal
+        ),
+        vec!["filesystem".to_string(), "search".to_string()],
+        vec!["**".to_string()],
+        Vec::new(),
+        Vec::new(),
+        CoordinationTaskStatus::Queued,
+    )];
+
+    // Plan task: break design doc into implementation tasks
+    let plan_provider = resolve_provider_for_category(run, &TaskCategory::Plan, Some("codex"))
+        .unwrap_or_else(|| "codex".to_string());
+    let plan_base_prompt = format!(
+        "Use the canonical design doc at `{}` and workspace evidence to break this goal into non-overlapping implementation tasks: {}.\n\nReturn JSON only, with no markdown fences or commentary. The JSON must be an array of objects. Each object must contain: `title`, `prompt`, `kind`, `read_scope`, `write_scope`, `allowed_tools`, and `acceptance_checks`.\n\nRules:\n- Do not include a `provider` field; provider assignment is handled by the coordination engine.\n- The coordination engine will distribute runnable tasks across available providers.\n- `kind` must be `read` or `write`.\n- `write` tasks must be implementation tasks that follow the canonical design doc at `{}`.\n- Keep write tasks small: one concrete capability per task.\n- Set `read_scope` to `[\"**\"]` for every generated task.\n- Set `write_scope` to `[\"**\"]` for every `write` task; `read` tasks should keep `write_scope` empty.\n- Patch-level git publish is the consolidation boundary, so do not try to narrow file ownership in task scopes.\n- `allowed_tools`, `read_scope`, `write_scope`, and `acceptance_checks` must be JSON arrays of strings.\n- Every `write` task must include at least 2 concrete `acceptance_checks`.\n- Prefer 3-8 concrete implementation slices over broad generic tasks.",
+        run.design_doc_path, goal, run.design_doc_path
+    );
+    let mut plan_task = make_task(
+        run,
+        &plan_id,
+        Some(survey_id.clone()),
+        CoordinationTaskKind::PlanFlatTasks,
+        Some(plan_provider.clone()),
+        "Plan non-overlapping implementation tasks from design doc".to_string(),
+        apply_prompt_family(&plan_provider, &plan_base_prompt),
+        vec!["filesystem".to_string(), "search".to_string()],
+        vec!["**".to_string(), "artifacts/**".to_string()],
+        Vec::new(),
+        vec![survey_id.clone()],
+        CoordinationTaskStatus::Blocked,
+    );
+    plan_task.task_category = Some(TaskCategory::Plan);
+    tasks.push(plan_task);
+
+    // Review task
+    let review_provider = resolve_provider_for_category(run, &TaskCategory::Review, Some("claude"))
+        .unwrap_or_else(|| "claude".to_string());
+    let review_base_prompt = format!(
+        "Review the implementation artifacts against the canonical design doc at `{}` and decide whether the run is compliant. If there are gaps, emit smaller follow-up fix tasks instead of broad recommendations.\n\n\
+        Return JSON only, with no markdown fences or commentary.\n\n\
+        JSON template (fill in your values):\n\
+        {{\"outcome\": \"completed_with_changes\", \"summary\": \"Brief description\", \"details\": \"What was done\", \"changed_files\": [\"file1.rs\"], \"tests_run\": [], \"warnings\": [], \"blockers\": [], \"remaining_gaps\": [], \"design_requirements_satisfied\": [\"req1\"], \"fix_tasks\": []}}",
+        run.design_doc_path
+    );
+    let mut review_task = make_task(
+        run,
+        &review_id,
+        Some(plan_id.clone()),
+        CoordinationTaskKind::ReviewArtifacts,
+        Some(review_provider.clone()),
+        "Review artifacts against design doc".to_string(),
+        apply_prompt_family(&review_provider, &review_base_prompt),
+        vec!["filesystem".to_string()],
+        vec!["artifacts/**".to_string(), run.design_doc_path.clone()],
+        if run.allow_write_tasks {
+            vec![".".to_string()]
+        } else {
+            Vec::new()
+        },
+        vec![plan_id],
+        CoordinationTaskStatus::Blocked,
+    );
+    review_task.task_category = Some(TaskCategory::Review);
+    tasks.push(review_task);
+
+    if run.allow_write_tasks {
+        let apply_id = Uuid::new_v4().to_string();
+        let apply_provider =
+            resolve_provider_for_category(run, &TaskCategory::DeepWrite, Some("codex"))
+                .unwrap_or_else(|| "codex".to_string());
+        let apply_base_prompt = format!(
+            "Apply the approved, non-overlapping edit tasks using the canonical design doc at `{}` and the dependency artifacts as your plan. You may edit files inside the declared write scope only, and you should make the smallest complete set of changes needed.",
+            run.design_doc_path
+        );
+        let mut apply_task = make_task(
+            run,
+            &apply_id,
+            Some(review_id.clone()),
+            CoordinationTaskKind::ApplyApprovedEdits,
+            Some(apply_provider.clone()),
+            "Apply non-overlapping edit tasks".to_string(),
+            apply_prompt_family(&apply_provider, &apply_base_prompt),
+            vec!["filesystem".to_string(), "edit".to_string()],
+            vec!["**".to_string()],
+            vec![".".to_string()],
+            vec![review_id],
+            CoordinationTaskStatus::Blocked,
+        );
+        apply_task.task_category = Some(TaskCategory::DeepWrite);
+        tasks.push(apply_task);
+    }
+
+    tasks
+}
+
 pub fn seed_lightweight_implementation_tasks(run: &CoordinationRun) -> Vec<CoordinationTask> {
     let goal = provider_prompt_text_for_run(run, &run.goal);
     let config = lightweight_config_from_run(run);

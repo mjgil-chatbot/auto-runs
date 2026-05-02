@@ -6,6 +6,8 @@ use crate::model::ModelProvider;
 #[allow(unused_imports)]
 use crate::AutonomousExecutionEnvironment;
 #[allow(unused_imports)]
+use crate::AutonomousWorkflowMode;
+#[allow(unused_imports)]
 use crate::ReviewScope;
 #[allow(unused_imports)]
 use anyhow::{Context, Result};

@@ -1,14 +1,18 @@
 use std::sync::atomic::{AtomicU32, Ordering};
+
 pub(crate) use super::make_council_provider_session;
 use super::parsing::*;
 use super::runtime_support::*;
 use super::*;
 use crate::coordination;
+use crate::data::ChatSession;
 use fs2::FileExt;
+
 const RAND_MULT: u32 = 1103515245;
 const RAND_INC: u32 = 12345;
 const RAND_MOD: u32 = 1 << 31;
 static RAND_SEED: AtomicU32 = AtomicU32::new(0xdeadbeef);
+
 fn rand_u32() -> u32 {
     let mut old = RAND_SEED.load(Ordering::Relaxed);
     loop {
@@ -19,13 +23,16 @@ fn rand_u32() -> u32 {
         }
     }
 }
+
 struct CouncilMutationLock(fs::File);
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct CouncilPendingCommit {
     council: CouncilRun,
     run: coordination::CoordinationRun,
     entries: Vec<CouncilEntry>,
 }
+
 impl Drop for CouncilMutationLock {
     fn drop(&mut self) {
         if let Err(e) = self.0.unlock() {
@@ -33,6 +40,7 @@ impl Drop for CouncilMutationLock {
         }
     }
 }
+
 fn open_council_lock_file(run_id: &str) -> Result<fs::File> {
     let path = coordination::council_lock_path(run_id);
     let parent = path.parent().context("council lock path missing parent")?;
@@ -44,6 +52,7 @@ fn open_council_lock_file(run_id: &str) -> Result<fs::File> {
         .open(&path)
         .with_context(|| format!("failed to open {}", path.display()))
 }
+
 fn try_acquire_council_lock(run_id: &str) -> Result<Option<CouncilMutationLock>> {
     let file = open_council_lock_file(run_id)?;
     match file.try_lock_exclusive() {
@@ -54,6 +63,7 @@ fn try_acquire_council_lock(run_id: &str) -> Result<Option<CouncilMutationLock>>
         }
     }
 }
+
 fn acquire_council_lock(run_id: &str) -> Result<CouncilMutationLock> {
     const LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
     let file = open_council_lock_file(run_id)?;
@@ -87,9 +97,58 @@ fn acquire_council_lock(run_id: &str) -> Result<CouncilMutationLock> {
         }
     }
 }
+
 fn council_commit_path(run_id: &str) -> std::path::PathBuf {
     coordination::council_json_path(run_id).with_file_name("council-commit.json")
 }
+
+pub fn load_council_run(run_id: &str) -> Result<CouncilRun> {
+    let path = coordination::council_json_path(run_id);
+    let raw =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+pub fn load_council_ledger(run_id: &str) -> Result<Vec<CouncilEntry>> {
+    let path = coordination::ledger_path(run_id);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err).with_context(|| format!("failed to open {}", path.display())),
+    };
+
+    let mut entries = Vec::new();
+    let mut lines = raw.lines().peekable();
+    while let Some(line) = lines.next() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<CouncilEntry>(line) {
+            Ok(entry) => entries.push(entry),
+            Err(err) => {
+                let is_last_line = lines.peek().is_none();
+                if is_last_line && !raw.ends_with('\n') {
+                    warn!(
+                        run_id = %run_id,
+                        path = %path.display(),
+                        error = %err,
+                        "ignoring trailing partial council ledger line"
+                    );
+                    break;
+                }
+                return Err(err)
+                    .with_context(|| format!("failed to parse ledger line in {}", path.display()));
+            }
+        }
+    }
+    Ok(entries)
+}
+
+enum CouncilStateLoad {
+    Ready(CouncilRun),
+    Quarantined,
+}
+
 fn file_missing_or_empty(path: &Path) -> bool {
     match fs::metadata(path) {
         Ok(metadata) => metadata.len() == 0,
@@ -97,6 +156,7 @@ fn file_missing_or_empty(path: &Path) -> bool {
         Err(_) => false,
     }
 }
+
 fn can_reseed_pristine_council_state(run_id: &str, run: &coordination::CoordinationRun) -> bool {
     let workspace_exists = Path::new(&run.workspace_path).is_dir();
     let pending_commit_missing = !council_commit_path(run_id).exists();
@@ -111,6 +171,7 @@ fn can_reseed_pristine_council_state(run_id: &str, run: &coordination::Coordinat
         && events_pristine
         && survey_missing
 }
+
 fn synthesize_failed_council_state(run: &coordination::CoordinationRun) -> CouncilRun {
     let max_turns = run.council_max_turns.unwrap_or(40);
     CouncilRun {
@@ -135,6 +196,7 @@ fn synthesize_failed_council_state(run: &coordination::CoordinationRun) -> Counc
         termination_policy: CouncilTerminationPolicy::for_max_turns(max_turns),
     }
 }
+
 fn quarantine_missing_council_state(
     run_id: &str,
     run: &mut coordination::CoordinationRun,
@@ -167,6 +229,32 @@ fn quarantine_missing_council_state(
     )?;
     Ok(())
 }
+
+fn load_or_recover_council_state(
+    run_id: &str,
+    run: &mut coordination::CoordinationRun,
+) -> Result<CouncilStateLoad> {
+    finalize_pending_council_commit(run_id)?;
+    let council_path = coordination::council_json_path(run_id);
+    if council_path.exists() {
+        return load_council_run(run_id).map(CouncilStateLoad::Ready);
+    }
+
+    if can_reseed_pristine_council_state(run_id, run) {
+        coordination::seed_council_run(run)?;
+        coordination::append_event(
+            run_id,
+            "council_state_recovered",
+            None,
+            "Recovered missing council.json by reseeding pristine Freeform Council state.",
+        )?;
+        return load_council_run(run_id).map(CouncilStateLoad::Ready);
+    }
+
+    quarantine_missing_council_state(run_id, run)?;
+    Ok(CouncilStateLoad::Quarantined)
+}
+
 fn termination_entries_for_state(
     run_id: &str,
     council: &mut CouncilRun,
@@ -225,6 +313,207 @@ fn termination_entries_for_state(
     council.updated_at = Utc::now();
     Ok(entries)
 }
+
+pub fn drive_council_turn(run_id: &str, instance_pid: u32) -> Result<bool> {
+    let Some(_lock) = try_acquire_council_lock(run_id)? else {
+        return Ok(false);
+    };
+    let mut run = coordination::load_run(run_id)?;
+    let mut council = match load_or_recover_council_state(run_id, &mut run)? {
+        CouncilStateLoad::Ready(council) => council,
+        CouncilStateLoad::Quarantined => return Ok(true),
+    };
+    let mut ledger = load_council_ledger(run_id)?;
+    let mut appended_anything = false;
+
+    if run.status == coordination::CoordinationRunStatus::Canceled
+        && council.status != CouncilRunStatus::Canceled
+    {
+        council.status = CouncilRunStatus::Canceled;
+        council.updated_at = Utc::now();
+        persist_council_and_run(&council, &mut run)?;
+        return Ok(false);
+    }
+
+    if matches!(
+        council.status,
+        CouncilRunStatus::Completed | CouncilRunStatus::Failed | CouncilRunStatus::Canceled
+    ) {
+        persist_council_and_run(&council, &mut run)?;
+        return Ok(false);
+    }
+
+    let seed_entries = ensure_seed_entries(&council, &ledger)?;
+    if !seed_entries.is_empty() {
+        commit_council_update(run_id, &council, &run, &seed_entries)?;
+        ledger.extend(seed_entries);
+        appended_anything = true;
+    }
+
+    let stale_claim_entries = revoke_stale_claims(&mut council, Utc::now());
+    if !stale_claim_entries.is_empty() {
+        council.turns_since_progress = 0;
+        council.updated_at = Utc::now();
+        commit_council_update(run_id, &council, &run, &stale_claim_entries)?;
+        ledger.extend(stale_claim_entries);
+        appended_anything = true;
+    }
+
+    // Reap claim files whose workers have gone stale (no heartbeat for 5 min).
+    // This complements the in-memory revoke_stale_claims above by updating the
+    // durable task.json status back to Queued so the task can be re-claimed.
+    if let Err(err) = coordination::reap_stale_claim_files(run_id) {
+        warn!(run_id = %run_id, error = %err, "failed to reap stale claim files");
+    }
+
+    let termination_entries = termination_entries_for_state(run_id, &mut council, run.status)?;
+    if !termination_entries.is_empty() {
+        commit_council_update(run_id, &council, &run, &termination_entries)?;
+        return Ok(true);
+    }
+
+    if let Some(stall_action) = check_stall(council.turns_since_progress) {
+        let stall_entries = apply_stall_action(run_id, &mut council, stall_action);
+        if !stall_entries.is_empty() {
+            commit_council_update(run_id, &council, &run, &stall_entries)?;
+            ledger.extend(stall_entries);
+            appended_anything = true;
+        }
+    }
+
+    let Some(speaker) = select_next_speaker(&council, &ledger) else {
+        council.status = CouncilRunStatus::WaitingForUser;
+        council.updated_at = Utc::now();
+        persist_council_and_run(&council, &mut run)?;
+        return Ok(appended_anything);
+    };
+
+    let prompt = build_council_prompt(&council, &ledger, speaker);
+    let response = match call_council_provider(speaker, &prompt, &run) {
+        Ok(response) => response,
+        Err(err) => {
+            warn!(
+                run_id = %run_id,
+                speaker = %speaker.mention_name(),
+                error = %err,
+                "council provider turn failed"
+            );
+            council.current_turn = council.current_turn.saturating_add(1);
+            council.updated_at = Utc::now();
+            let mut failure = CouncilEntry::new(
+                CouncilSpeaker::System,
+                CouncilEntryKind::SystemNudge,
+                format!(
+                    "{} could not complete turn {}: {}",
+                    speaker.label(),
+                    council.current_turn,
+                    err
+                ),
+            );
+            failure.mentions = vec![speaker.mention_name().to_string()];
+            let mut entries = vec![failure];
+            entries.extend(termination_entries_for_state(
+                run_id,
+                &mut council,
+                run.status,
+            )?);
+            commit_council_update(run_id, &council, &run, &entries)?;
+            return Ok(true);
+        }
+    };
+
+    let mut turn_entries = parse_and_validate_council_response(
+        run_id,
+        &mut council,
+        speaker,
+        &response,
+        instance_pid,
+    )?;
+    council.current_turn = council.current_turn.saturating_add(1);
+    council.updated_at = Utc::now();
+    turn_entries.extend(termination_entries_for_state(
+        run_id,
+        &mut council,
+        run.status,
+    )?);
+
+    commit_council_update(run_id, &council, &run, &turn_entries)?;
+
+    debug!(
+        run_id = %run_id,
+        speaker = %speaker.mention_name(),
+        current_turn = council.current_turn,
+        "completed council turn"
+    );
+    Ok(true)
+}
+
+pub fn add_council_user_interjection(run_id: &str, content: &str) -> Result<()> {
+    let _lock = acquire_council_lock(run_id)?;
+    let mut run = coordination::load_run(run_id)?;
+    let mut council = match load_or_recover_council_state(run_id, &mut run)? {
+        CouncilStateLoad::Ready(council) => council,
+        CouncilStateLoad::Quarantined => {
+            anyhow::bail!(
+                "council run {} is corrupted and was marked failed; inspect council_state_corrupt events",
+                run_id
+            )
+        }
+    };
+
+    let mut entry = CouncilEntry::new(
+        CouncilSpeaker::User,
+        CouncilEntryKind::UserInterjection,
+        content.trim(),
+    );
+    entry.mentions = extract_mentions(content);
+
+    let mut system_entries = Vec::new();
+    if content.contains("[REVOKE_ALL_VOTES]") && !council.votes_complete.is_empty() {
+        council.votes_complete.clear();
+        system_entries.push(CouncilEntry::new(
+            CouncilSpeaker::System,
+            CouncilEntryKind::SystemNudge,
+            "Broker revoked all completion votes at user request.",
+        ));
+    } else {
+        let revoked = extract_revoke_votes(content);
+        if !revoked.is_empty() {
+            council.votes_complete.retain(|speaker| {
+                !revoked
+                    .iter()
+                    .any(|revoked_speaker| revoked_speaker == speaker)
+            });
+            system_entries.push(CouncilEntry::new(
+                CouncilSpeaker::System,
+                CouncilEntryKind::SystemNudge,
+                format!(
+                    "Broker revoked completion votes for: {}",
+                    revoked
+                        .iter()
+                        .map(CouncilSpeaker::label)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ));
+        }
+    }
+
+    council.status = CouncilRunStatus::Active;
+    council.turns_since_progress = 0;
+    council.updated_at = Utc::now();
+    let mut pending_entries = vec![entry.clone()];
+    pending_entries.extend(system_entries);
+    commit_council_update(run_id, &council, &run, &pending_entries)?;
+
+    info!(
+        run_id = %run_id,
+        entry_id = %entry.entry_id,
+        "user interjection added to council ledger"
+    );
+    Ok(())
+}
+
 fn ensure_seed_entries(council: &CouncilRun, ledger: &[CouncilEntry]) -> Result<Vec<CouncilEntry>> {
     if !ledger.is_empty() {
         return Ok(Vec::new());
@@ -253,6 +542,7 @@ fn ensure_seed_entries(council: &CouncilRun, ledger: &[CouncilEntry]) -> Result<
 
     Ok(entries)
 }
+
 fn write_workspace_survey_artifact(council: &CouncilRun) -> Result<coordination::TaskArtifact> {
     let now = Utc::now();
     let task = coordination::CoordinationTask {
@@ -298,6 +588,7 @@ fn write_workspace_survey_artifact(council: &CouncilRun) -> Result<coordination:
     )?;
     Ok(artifact)
 }
+
 fn append_ledger_entries(run_id: &str, entries: &[CouncilEntry]) -> Result<()> {
     if entries.is_empty() {
         return Ok(());
@@ -333,6 +624,7 @@ fn append_ledger_entries(run_id: &str, entries: &[CouncilEntry]) -> Result<()> {
 
     Ok(())
 }
+
 fn append_events_for_entries(run_id: &str, entries: &[CouncilEntry]) -> Result<()> {
     let events_path = coordination::council_json_path(run_id).with_file_name("events.jsonl");
     let existing_event_ids = match coordination::load_events(run_id, None, None) {
@@ -372,6 +664,55 @@ fn append_events_for_entries(run_id: &str, entries: &[CouncilEntry]) -> Result<(
     }
     Ok(())
 }
+
+fn missing_commit_entries(run_id: &str, entries: &[CouncilEntry]) -> Result<Vec<CouncilEntry>> {
+    let existing_entry_ids = load_council_ledger(run_id)?
+        .into_iter()
+        .map(|entry| entry.entry_id)
+        .collect::<HashSet<_>>();
+    Ok(entries
+        .iter()
+        .filter(|entry| !existing_entry_ids.contains(&entry.entry_id))
+        .cloned()
+        .collect())
+}
+
+fn finalize_pending_council_commit(run_id: &str) -> Result<()> {
+    let path = council_commit_path(run_id);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).with_context(|| format!("failed to read {}", path.display())),
+    };
+    let pending: CouncilPendingCommit = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    let missing_entries = missing_commit_entries(run_id, &pending.entries)?;
+    if !missing_entries.is_empty() {
+        append_ledger_entries(run_id, &missing_entries)?;
+    }
+    append_events_for_entries(run_id, &pending.entries)?;
+    let mut run = pending.run;
+    persist_council_and_run(&pending.council, &mut run)?;
+    fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
+    Ok(())
+}
+
+fn commit_council_update(
+    run_id: &str,
+    council: &CouncilRun,
+    run: &coordination::CoordinationRun,
+    entries: &[CouncilEntry],
+) -> Result<()> {
+    let path = council_commit_path(run_id);
+    let pending = CouncilPendingCommit {
+        council: council.clone(),
+        run: run.clone(),
+        entries: entries.to_vec(),
+    };
+    coordination::write_json_atomic(&path, &pending)?;
+    finalize_pending_council_commit(run_id)
+}
+
 fn persist_council_and_run(
     council: &CouncilRun,
     run: &mut coordination::CoordinationRun,
@@ -392,6 +733,7 @@ fn persist_council_and_run(
     coordination::write_json_atomic(&coordination::run_path(&council.run_id), run)?;
     Ok(())
 }
+
 fn call_council_provider(
     speaker: CouncilSpeaker,
     prompt: &str,
