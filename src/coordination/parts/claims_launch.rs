@@ -2,11 +2,19 @@ use super::*;
 #[allow(unused_imports)]
 use crate::config;
 #[allow(unused_imports)]
+use crate::data::ChatSession;
+#[allow(unused_imports)]
+use crate::memory;
+#[allow(unused_imports)]
 use crate::model::ModelProvider;
 #[allow(unused_imports)]
-use crate::AutonomousExecutionEnvironment;
+use crate::provider_bridge::{
+    autonomous_provider_overrides, call_provider_cli_stream_with_overrides,
+};
 #[allow(unused_imports)]
-use crate::AutonomousWorkflowMode;
+use crate::{
+    AutonomousExecutionEnvironment, AutonomousWorkflowMode, ReviewFixMode, ReviewScope, TurnPolicy,
+};
 #[allow(unused_imports)]
 use anyhow::{Context, Result};
 #[allow(unused_imports)]
@@ -36,6 +44,7 @@ use std::thread;
 use std::time::Duration;
 #[allow(unused_imports)]
 use uuid::Uuid;
+
 #[path = "claims_launch_runsc_mounts.rs"]
 mod claims_launch_runsc_mounts;
 #[allow(unused_imports)]
@@ -43,8 +52,12 @@ pub use claims_launch_runsc_mounts::autonomous_worker_runsc_mounts;
 #[allow(unused_imports)]
 use claims_launch_runsc_mounts::{codex_home_sidecar_dir, resolve_host_cli_binary};
 #[cfg(test)]
+#[path = "claims_launch_misc_tests.rs"]
+mod claims_launch_misc_tests;
+#[cfg(test)]
 #[path = "claims_launch_worker_failure_tests.rs"]
 mod claims_launch_worker_failure_tests;
+
 /// Hard wall-clock timeout for spawned workers: 60 minutes.
 ///
 /// Unlike the old estimate-based timeouts, this limit is fixed and applies
@@ -52,10 +65,12 @@ mod claims_launch_worker_failure_tests;
 /// and their tasks are re-queued for retry.
 const WORKER_HARD_WALL_CLOCK_TIMEOUT_SECS: u64 = 60 * 60;
 const LAUNCHER_CLAIM_HEARTBEAT_BRIDGE_SECS: u64 = TASK_HEARTBEAT_SECS;
+
 fn current_executable_path() -> Result<PathBuf> {
     let path = std::env::current_exe().context("failed to resolve current executable")?;
     Ok(path.canonicalize().ok().unwrap_or(path))
 }
+
 fn expected_worker_profile(current_exe: &Path) -> &'static str {
     for ancestor in current_exe.ancestors() {
         let Some(profile_name) = ancestor.file_name().and_then(|name| name.to_str()) else {
@@ -79,6 +94,7 @@ fn expected_worker_profile(current_exe: &Path) -> &'static str {
     }
     "release"
 }
+
 fn other_profile_dir(current_dir: &Path) -> Option<(&'static str, PathBuf)> {
     let current_profile = current_dir.file_name()?.to_str()?;
     let other_profile = match current_profile {
@@ -92,6 +108,7 @@ fn other_profile_dir(current_dir: &Path) -> Option<(&'static str, PathBuf)> {
     }
     Some((other_profile, target_dir.join(other_profile)))
 }
+
 fn resolve_companion_binary_from_paths(
     current_exe: &Path,
     manifest_dir: &Path,
@@ -164,6 +181,7 @@ fn resolve_companion_binary_from_paths(
         binary_name,
     );
 }
+
 pub fn resolve_autonomous_worker_binary() -> Result<PathBuf> {
     let current_exe = current_executable_path()?;
     resolve_companion_binary_from_paths(
@@ -173,6 +191,7 @@ pub fn resolve_autonomous_worker_binary() -> Result<PathBuf> {
         "auto-runs-worker",
     )
 }
+
 pub fn find_setsid_binary() -> Option<PathBuf> {
     for candidate in &["/usr/bin/setsid", "/bin/setsid", "/usr/local/bin/setsid"] {
         let p = PathBuf::from(candidate);
@@ -182,13 +201,16 @@ pub fn find_setsid_binary() -> Option<PathBuf> {
     }
     None
 }
+
 fn worker_logs_dir(run_id: &str) -> PathBuf {
     run_dir(run_id).join("worker-logs")
 }
+
 fn worker_stderr_log_path(run_id: &str, task_id: &str) -> PathBuf {
     let stamp = Utc::now().format("%Y%m%dT%H%M%S%.fZ");
     worker_logs_dir(run_id).join(format!("{task_id}.{stamp}.stderr.log"))
 }
+
 fn stderr_stdio_for_log(path: Option<&Path>) -> Result<std::process::Stdio> {
     let Some(path) = path else {
         return Ok(std::process::Stdio::null());
@@ -206,6 +228,7 @@ fn stderr_stdio_for_log(path: Option<&Path>) -> Result<std::process::Stdio> {
         .with_context(|| format!("failed to open {}", path.display()))?;
     Ok(std::process::Stdio::from(file))
 }
+
 fn read_worker_stderr_excerpt(path: &Path) -> Option<String> {
     let raw = fs::read_to_string(path).ok()?;
     let collapsed = raw
@@ -225,6 +248,7 @@ fn read_worker_stderr_excerpt(path: &Path) -> Option<String> {
     }
     Some(excerpt)
 }
+
 fn worker_exit_detail(detail: &str, stderr_log_path: &Path) -> String {
     let mut decorated = format!("{detail}; stderr_log={}", stderr_log_path.display());
     if let Some(excerpt) = read_worker_stderr_excerpt(stderr_log_path) {
@@ -232,7 +256,9 @@ fn worker_exit_detail(detail: &str, stderr_log_path: &Path) -> String {
     }
     decorated
 }
+
 const SPAWNED_WORKER_EXIT_POLL_MS: u64 = 250;
+
 fn autonomous_worker_spawn_args(
     task: &CoordinationTask,
     provider_name: &str,
@@ -246,6 +272,7 @@ fn autonomous_worker_spawn_args(
         launcher_pid.to_string(),
     ]
 }
+
 fn terminate_spawned_worker_process(child: &mut std::process::Child) {
     let pid = child.id() as libc::pid_t;
     if pid <= 0 {
@@ -268,6 +295,7 @@ fn terminate_spawned_worker_process(child: &mut std::process::Child) {
     }
     let _ = child.kill();
 }
+
 fn spawned_worker_stall_detail(
     run_id: &str,
     task_id: &str,
@@ -296,6 +324,7 @@ fn spawned_worker_stall_detail(
         claim_lifecycle_summary(&claim)
     ))
 }
+
 fn spawned_worker_adoption_stall_detail(
     run_id: &str,
     task_id: &str,
@@ -322,6 +351,7 @@ fn spawned_worker_adoption_stall_detail(
         claim_lifecycle_summary(&claim)
     ))
 }
+
 fn spawned_worker_timeout_detail(
     task: &CoordinationTask,
     started_at: std::time::Instant,
@@ -336,6 +366,7 @@ fn spawned_worker_timeout_detail(
         timeout.as_secs() / 60
     ))
 }
+
 fn release_claim_after_spawned_worker_exit(
     run_id: &str,
     task_id: &str,
@@ -424,6 +455,7 @@ fn release_claim_after_spawned_worker_exit(
     sync_run_summary_after_task_update(run_id, task.updated_at)?;
     Ok(())
 }
+
 pub fn spawn_daemonized(
     target: &Path,
     args: &[&str],
@@ -462,6 +494,7 @@ pub fn spawn_daemonized(
     cmd.spawn()
         .with_context(|| format!("failed to spawn {}", target.display()))
 }
+
 pub fn spawn_provider_task_process(
     task: &CoordinationTask,
     provider: &str,
@@ -577,6 +610,7 @@ pub fn spawn_provider_task_process(
     });
     Ok(())
 }
+
 pub fn spawn_daemonized_with_stderr(
     target: &Path,
     args: &[&str],
@@ -616,6 +650,7 @@ pub fn spawn_daemonized_with_stderr(
     cmd.spawn()
         .with_context(|| format!("failed to spawn {}", target.display()))
 }
+
 pub fn handle_launch_failure_after_claim(
     run_id: &str,
     task_id: &str,
@@ -624,6 +659,7 @@ pub fn handle_launch_failure_after_claim(
 ) -> Result<()> {
     finalize_launch_failure(run_id, task_id, launcher_pid, err, false)
 }
+
 pub fn release_claim_after_launch_failure(
     run_id: &str,
     task_id: &str,
@@ -632,6 +668,7 @@ pub fn release_claim_after_launch_failure(
 ) -> Result<()> {
     finalize_launch_failure(run_id, task_id, launcher_pid, err, true)
 }
+
 pub fn release_claim_after_worker_failure(
     run_id: &str,
     task_id: &str,
@@ -687,6 +724,7 @@ pub fn release_claim_after_worker_failure(
     let _ = fs::remove_file(claim_path(run_id, task_id));
     Ok(())
 }
+
 pub fn finalize_launch_failure(
     run_id: &str,
     task_id: &str,
