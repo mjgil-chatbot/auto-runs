@@ -1,6 +1,20 @@
 use super::*;
 #[allow(unused_imports)]
-use crate::AutonomousWorkflowMode;
+use crate::config;
+#[allow(unused_imports)]
+use crate::data::ChatSession;
+#[allow(unused_imports)]
+use crate::memory;
+#[allow(unused_imports)]
+use crate::model::ModelProvider;
+#[allow(unused_imports)]
+use crate::provider_bridge::{
+    autonomous_provider_overrides, call_provider_cli_stream_with_overrides,
+};
+#[allow(unused_imports)]
+use crate::{
+    AutonomousExecutionEnvironment, AutonomousWorkflowMode, ReviewFixMode, ReviewScope, TurnPolicy,
+};
 #[allow(unused_imports)]
 use anyhow::{Context, Result};
 #[allow(unused_imports)]
@@ -32,6 +46,7 @@ use std::thread;
 use std::time::Duration;
 #[allow(unused_imports)]
 use uuid::Uuid;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskPayloadKind {
@@ -43,11 +58,13 @@ pub enum TaskPayloadKind {
     PerfBenchmark,
     CouncilControl,
 }
+
 impl Default for TaskPayloadKind {
     fn default() -> Self {
         Self::Generic
     }
 }
+
 impl TaskPayloadKind {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -59,7 +76,9 @@ impl TaskPayloadKind {
             Self::PerfBenchmark => "perf_benchmark",
             Self::CouncilControl => "council_control",
         }
-    }}
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskArtifactEnvelope {
     pub outcome: CoordinationTaskOutcome,
@@ -87,15 +106,18 @@ pub struct TaskArtifactEnvelope {
     #[serde(default)]
     pub payload: serde_json::Value,
 }
+
 fn default_contract_version() -> u32 {
     1
 }
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ContractResponseMode {
     JsonOnly,
     JsonWithEmbeddedMarkdown,
 }
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReaskStrategy {
@@ -103,6 +125,7 @@ pub enum ReaskStrategy {
     Skeleton,
     Field,
 }
+
 #[derive(Clone, Debug)]
 pub struct TaskContract {
     pub task_kind: CoordinationTaskKind,
@@ -112,11 +135,13 @@ pub struct TaskContract {
     pub response_mode: ContractResponseMode,
     pub reask_strategy: ReaskStrategy,
 }
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default, JsonSchema)]
 pub struct PlanTasksPayload {
     #[serde(default)]
     pub generated_tasks: Vec<GeneratedTaskSpec>,
 }
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default, JsonSchema)]
 pub struct ReviewFindingsPayload {
     #[serde(default)]
@@ -124,23 +149,28 @@ pub struct ReviewFindingsPayload {
     #[serde(default)]
     pub fix_tasks: Vec<GeneratedTaskSpec>,
 }
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default, JsonSchema)]
 pub struct DesignDocPayload {
     #[serde(default)]
     pub markdown: String,
 }
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default, JsonSchema)]
 pub struct PerfIdeasPayload {
     #[serde(default)]
     pub ideas: Vec<PerfIdea>,
 }
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct CouncilControlPayload {
     #[serde(default)]
     pub actions: Vec<super::council::CouncilAction>,
 }
+
 static CONTRACT_REGISTRY: std::sync::LazyLock<Vec<TaskContract>> =
     std::sync::LazyLock::new(build_contract_registry);
+
 fn build_contract_registry() -> Vec<TaskContract> {
     vec![
         TaskContract {
@@ -193,9 +223,11 @@ fn build_contract_registry() -> Vec<TaskContract> {
         },
     ]
 }
+
 pub fn lookup_contract(kind: CoordinationTaskKind) -> Option<&'static TaskContract> {
     CONTRACT_REGISTRY.iter().find(|c| c.task_kind == kind)
 }
+
 pub fn lookup_contract_for_task(task: &CoordinationTask) -> Option<&'static TaskContract> {
     let contract = lookup_contract(task.kind)?;
     if task.kind != CoordinationTaskKind::PlanFlatTasks {
@@ -211,6 +243,7 @@ pub fn lookup_contract_for_task(task: &CoordinationTask) -> Option<&'static Task
         Some(contract)
     }
 }
+
 pub(crate) fn normalize_provider_response(value: &mut serde_json::Value) {
     let Some(obj) = value.as_object_mut() else {
         return;
@@ -253,6 +286,7 @@ pub(crate) fn normalize_provider_response(value: &mut serde_json::Value) {
         }
     }
 }
+
 /// Returns Some((field_name, reason)) if the finding has a validation error.
 /// Returns None if the finding is valid.
 fn validate_review_finding(
@@ -280,6 +314,7 @@ fn validate_review_finding(
     }
     None
 }
+
 fn normalize_finding_fields(value: &mut serde_json::Value) {
     let Some(obj) = value.as_object_mut() else {
         return;
@@ -292,6 +327,7 @@ fn normalize_finding_fields(value: &mut serde_json::Value) {
         }
     }
 }
+
 pub fn parse_typed_envelope(json: &str) -> Result<TaskArtifactEnvelope> {
     let mut value: serde_json::Value =
         serde_json::from_str(json).context("invalid envelope JSON")?;
@@ -306,10 +342,12 @@ pub fn parse_typed_envelope(json: &str) -> Result<TaskArtifactEnvelope> {
         serde_json::from_value(value).context("invalid typed envelope structure")?;
     Ok(envelope)
 }
+
 pub fn parse_contract_envelope_from_response(response: &str) -> Result<TaskArtifactEnvelope> {
     let json = extract_first_json_object(response).context("missing JSON object in task output")?;
     parse_typed_envelope(json)
 }
+
 pub fn typed_envelope_to_legacy_report(envelope: &TaskArtifactEnvelope) -> TaskExecutionReport {
     let fix_tasks = if envelope.payload_kind == TaskPayloadKind::ReviewFindings {
         review_findings_payload_from_envelope(envelope)
@@ -334,6 +372,7 @@ pub fn typed_envelope_to_legacy_report(envelope: &TaskArtifactEnvelope) -> TaskE
         recovery_action: None,
     }
 }
+
 pub fn try_parse_typed_or_legacy(
     response: &str,
 ) -> Result<(TaskExecutionReport, Option<TaskArtifactEnvelope>)> {
@@ -348,26 +387,31 @@ pub fn try_parse_typed_or_legacy(
     let report = parse_task_execution_report(response)?;
     Ok((report, None))
 }
+
 pub fn plan_tasks_payload_from_envelope(
     envelope: &TaskArtifactEnvelope,
 ) -> Result<PlanTasksPayload> {
     serde_json::from_value(envelope.payload.clone()).context("invalid PlanTasks payload")
 }
+
 pub fn review_findings_payload_from_envelope(
     envelope: &TaskArtifactEnvelope,
 ) -> Result<ReviewFindingsPayload> {
     serde_json::from_value(envelope.payload.clone()).context("invalid ReviewFindings payload")
 }
+
 pub fn design_doc_payload_from_envelope(
     envelope: &TaskArtifactEnvelope,
 ) -> Result<DesignDocPayload> {
     serde_json::from_value(envelope.payload.clone()).context("invalid DesignDoc payload")
 }
+
 pub fn perf_ideas_payload_from_envelope(
     envelope: &TaskArtifactEnvelope,
 ) -> Result<PerfIdeasPayload> {
     serde_json::from_value(envelope.payload.clone()).context("invalid PerfIdeas payload")
 }
+
 fn normalize_workspace_scope(scope: &str, workspace_root: &Path) -> Option<String> {
     if !workspace_root.is_absolute() {
         return None;
@@ -381,6 +425,7 @@ fn normalize_workspace_scope(scope: &str, workspace_root: &Path) -> Option<Strin
         &stripped.to_string_lossy().replace('\\', "/"),
     ))
 }
+
 fn normalize_generated_task_specs_for_workspace(
     specs: &mut [GeneratedTaskSpec],
     workspace_root: &Path,
@@ -398,6 +443,7 @@ fn normalize_generated_task_specs_for_workspace(
         }
     }
 }
+
 fn normalize_contract_envelope_for_workspace(
     envelope: &mut TaskArtifactEnvelope,
     workspace_root: &Path,
@@ -422,6 +468,7 @@ fn normalize_contract_envelope_for_workspace(
     }
     Ok(())
 }
+
 pub fn validate_contract_envelope(
     contract: &TaskContract,
     envelope: &TaskArtifactEnvelope,
@@ -444,6 +491,7 @@ pub fn validate_contract_envelope(
     errors.extend(validate_typed_payload(envelope));
     errors
 }
+
 fn validate_contract_response_inner(
     contract: &TaskContract,
     response: &str,
@@ -502,9 +550,11 @@ fn validate_contract_response_inner(
         }
     }
 }
+
 pub fn validate_contract_response(contract: &TaskContract, response: &str) -> Vec<String> {
     validate_contract_response_inner(contract, response, None)
 }
+
 pub fn validate_contract_response_for_task(
     contract: &TaskContract,
     response: &str,
@@ -512,6 +562,18 @@ pub fn validate_contract_response_for_task(
 ) -> Vec<String> {
     validate_contract_response_inner(contract, response, Some(Path::new(&task.cwd)))
 }
+
+pub fn normalize_contract_response_for_task(
+    contract: &TaskContract,
+    response: &str,
+    task: &CoordinationTask,
+) -> Result<String> {
+    let mut envelope = parse_contract_envelope_from_response(response)?;
+    debug_assert_eq!(envelope.payload_kind, contract.payload_kind);
+    normalize_contract_envelope_for_workspace(&mut envelope, Path::new(&task.cwd))?;
+    serde_json::to_string(&envelope).context("failed to serialize normalized contract response")
+}
+
 pub fn validate_typed_payload(envelope: &TaskArtifactEnvelope) -> Vec<String> {
     let mut errors = Vec::new();
     match envelope.payload_kind {
