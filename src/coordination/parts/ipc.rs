@@ -16,20 +16,25 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
+
 use anyhow::{Context, Result};
 use rust_debug::tracing::{debug, error, info, warn};
+
 /// Path to the worker queue request FIFO.
 pub fn worker_queue_req_fifo_path() -> PathBuf {
     coordination_root().join("worker-queue-req.fifo")
 }
+
 /// Path to the worker queue response FIFO.
 pub fn worker_queue_resp_fifo_path() -> PathBuf {
     coordination_root().join("worker-queue-resp.fifo")
 }
+
 /// Path to the coordination root.
 fn coordination_root() -> PathBuf {
     super::super::config::shared_infra_dir().join("coordination")
 }
+
 /// Creates both FIFOs if they do not yet exist.  Idempotent — succeeds
 /// silently if the paths already exist as FIFOs.
 pub fn ensure_worker_queue_fifos() -> Result<()> {
@@ -50,12 +55,15 @@ pub fn ensure_worker_queue_fifos() -> Result<()> {
     }
     Ok(())
 }
+
 /// Maximum time a worker waits for a FIFO response before backing off.
 const FIFO_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Default polling backoff base for workers with no task available.
 const BACKOFF_BASE_SECS: u64 = 1;
 /// Maximum backoff cap.
 const BACKOFF_CAP_SECS: u64 = 30;
+
 /// A request parsed from a worker's FIFO payload.
 #[derive(Debug)]
 pub struct WorkerRequest {
@@ -63,6 +71,7 @@ pub struct WorkerRequest {
     pub instance_pid: u32,
     pub provider: String,
 }
+
 /// The result of processing a worker request.
 #[derive(Debug)]
 pub enum WorkerQueueResult {
@@ -73,6 +82,7 @@ pub enum WorkerQueueResult {
     /// An error occurred while processing the request.
     Error(String),
 }
+
 impl WorkerRequest {
     fn parse(raw: &str) -> Option<Self> {
         let mut fields = raw.split('\t');
@@ -84,7 +94,90 @@ impl WorkerRequest {
             instance_pid,
             provider,
         })
-    }}
+    }
+}
+
+/// The worker queue server loop.
+///
+/// Opens the request FIFO in read mode and processes incoming worker requests.
+/// For each valid request it calls `claim_next_runnable_task` and writes the
+/// result to the response FIFO.  Exits on fatal errors; transient errors are
+/// logged and skipped.
+pub fn run_worker_queue_server() -> Result<()> {
+    let req_path = worker_queue_req_fifo_path();
+
+    ensure_worker_queue_fifos()?;
+
+    info!(req_fifo = %req_path.display(), "worker queue server started");
+
+    loop {
+        let req_file = fs::OpenOptions::new()
+            .read(true)
+            .open(&req_path)
+            .with_context(|| format!("failed to open request FIFO {}", req_path.display()))?;
+        let mut reader = BufReader::new(req_file);
+        let mut line = String::new();
+
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => {
+                    debug!("request FIFO writer closed; reopening");
+                    break;
+                }
+                Ok(_) => {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+
+                    let request = match WorkerRequest::parse(trimmed) {
+                        Some(r) => r,
+                        None => {
+                            warn!(raw = %trimmed, "malformed worker request; skipping");
+                            continue;
+                        }
+                    };
+
+                    debug!(
+                        run_id = %request.run_id,
+                        instance_pid = request.instance_pid,
+                        provider = %request.provider,
+                        "processing worker request"
+                    );
+
+                    let result = process_worker_request(&request);
+
+                    if let Err(err) = send_response(&result) {
+                        warn!(error = %err, "failed to send worker response");
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
+                    continue;
+                }
+                Err(err) => {
+                    error!(error = %err, "fatal error reading request FIFO");
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn process_worker_request(req: &WorkerRequest) -> WorkerQueueResult {
+    match claim_next_runnable_provider_task(&req.run_id, req.instance_pid, &req.provider) {
+        Ok(Some(task)) => WorkerQueueResult::TaskClaimed {
+            task_id: task.task_id,
+        },
+        Ok(None) => WorkerQueueResult::NoTask,
+        Err(err) => WorkerQueueResult::Error(err.to_string()),
+    }
+}
+
 fn send_response(result: &WorkerQueueResult) -> Result<()> {
     let resp_path = worker_queue_resp_fifo_path();
     let mut resp_file = OpenOptions::new()
@@ -105,13 +198,18 @@ fn send_response(result: &WorkerQueueResult) -> Result<()> {
     resp_file.flush()?;
     Ok(())
 }
+
+// ── Worker-side client ────────────────────────────────────────────────────────
+
 /// Maximum total time a worker spends polling before giving up.
 const WORKER_POLL_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
 /// Information returned to the caller of `poll_task_until_found`.
 #[derive(Debug)]
 pub struct WorkerTaskAssignment {
     pub task_id: String,
 }
+
 /// Request a task assignment by contacting the worker queue FIFO.
 ///
 /// Workers call this on startup.  If no task is available the function
@@ -243,6 +341,7 @@ pub fn poll_task_until_found(
         backoff_secs = (backoff_secs * 2).min(BACKOFF_CAP_SECS);
     }
 }
+
 fn parse_assignment_response(line: &str) -> Option<WorkerTaskAssignment> {
     if line.is_empty() {
         None
@@ -255,7 +354,9 @@ fn parse_assignment_response(line: &str) -> Option<WorkerTaskAssignment> {
         })
     }
 }
+
 static RAND_STATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0xdeadbeef);
+
 fn rand_jitter() -> f64 {
     let mut state = RAND_STATE.load(std::sync::atomic::Ordering::Relaxed);
     loop {
@@ -276,10 +377,12 @@ fn rand_jitter() -> f64 {
         }
     }
 }
+
 fn get_raw_fd(file: &File) -> libc::c_int {
     use std::os::unix::io::AsRawFd;
     file.as_raw_fd()
 }
+
 #[cfg(test)]
 mod tests {
     use super::WorkerRequest;

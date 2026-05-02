@@ -1,4 +1,5 @@
 use super::*;
+
 pub const LIGHTWEIGHT_TASK_SPLITTER_NOTE_KEY: &str = "lightweight_task_splitter";
 pub const LIGHTWEIGHT_WORKERS_NOTE_KEY: &str = "lightweight_worker_models";
 pub const LIGHTWEIGHT_VALIDATION_NOTE_KEY: &str = "lightweight_validation_model";
@@ -6,6 +7,7 @@ pub const LIGHTWEIGHT_TASK_DOC_NOTE_KEY: &str = "lightweight_task_doc";
 pub const LIGHTWEIGHT_TASK_DOC_CYCLE_NOTE_KEY: &str = "lightweight_task_doc_cycle";
 pub const LIGHTWEIGHT_REPO_CONFIGURATION_NOTE_KEY: &str = "lightweight_repo_configuration";
 const LIGHTWEIGHT_PUBLISH_RECOVERY_MARKER: &str = "Git publish recovery context:";
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LightweightRepoConfiguration {
     #[default]
@@ -13,6 +15,7 @@ pub enum LightweightRepoConfiguration {
     Rust,
     Zig,
 }
+
 impl LightweightRepoConfiguration {
     pub fn display_name(self) -> &'static str {
         match self {
@@ -20,16 +23,16 @@ impl LightweightRepoConfiguration {
             Self::Rust => "Rust",
             Self::Zig => "Zig",
         }
-    }}
-impl LightweightRepoConfiguration {
+    }
+
     fn note_value(self) -> &'static str {
         match self {
             Self::None => "",
             Self::Rust => "rust",
             Self::Zig => "zig",
         }
-    }}
-impl LightweightRepoConfiguration {
+    }
+
     fn from_note_value(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "" | "n/a" | "na" | "none" => Some(Self::None),
@@ -37,7 +40,9 @@ impl LightweightRepoConfiguration {
             "zig" => Some(Self::Zig),
             _ => None,
         }
-    }}
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LightweightImplementationConfig {
     pub task_splitter_provider: String,
@@ -47,14 +52,16 @@ pub struct LightweightImplementationConfig {
     pub task_doc_cycle: u32,
     pub repo_configuration: LightweightRepoConfiguration,
 }
+
 pub struct LightweightWorkflowBehavior<'a> {
     run: &'a CoordinationRun,
 }
+
 impl<'a> LightweightWorkflowBehavior<'a> {
     pub fn for_run(run: &'a CoordinationRun) -> Option<Self> {
         uses_lightweight_runtime_mode(&run.workflow_mode).then_some(Self { run })
-    }}
-impl<'a> LightweightWorkflowBehavior<'a> {
+    }
+
     pub fn claim_provider(
         &self,
         task: &CoordinationTask,
@@ -68,20 +75,20 @@ impl<'a> LightweightWorkflowBehavior<'a> {
         is_provider_on_cooldown(self.run, &provider, now)
             .is_none()
             .then_some(provider)
-    }}
-impl<'a> LightweightWorkflowBehavior<'a> {
+    }
+
     pub fn skips_artifact_acceptance(&self) -> bool {
         true
-    }}
-impl<'a> LightweightWorkflowBehavior<'a> {
+    }
+
     pub fn tracks_changed_files(&self) -> bool {
         false
-    }}
-impl<'a> LightweightWorkflowBehavior<'a> {
+    }
+
     pub fn persists_materialized_files(&self) -> bool {
         false
-    }}
-impl<'a> LightweightWorkflowBehavior<'a> {
+    }
+
     pub fn next_task_doc_after_review(
         &self,
         task: &CoordinationTask,
@@ -98,7 +105,9 @@ impl<'a> LightweightWorkflowBehavior<'a> {
             return None;
         }
         Some(lightweight_next_task_doc_path_for_run(self.run))
-    }}
+    }
+}
+
 pub fn lightweight_config_from_run(run: &CoordinationRun) -> LightweightImplementationConfig {
     if run.workflow_mode == AutonomousWorkflowMode::GithubBranchFix {
         return LightweightImplementationConfig {
@@ -143,6 +152,7 @@ pub fn lightweight_config_from_run(run: &CoordinationRun) -> LightweightImplemen
         repo_configuration,
     }
 }
+
 pub fn normalize_workspace_local_path(path: &str, workspace_path: &str) -> String {
     let trimmed = path.trim();
     if trimmed.is_empty() {
@@ -161,6 +171,7 @@ pub fn normalize_workspace_local_path(path: &str, workspace_path: &str) -> Strin
 
     normalize_scope(trimmed)
 }
+
 pub fn lightweight_default_task_doc_path(design_doc_path: &str) -> String {
     let design_path = Path::new(design_doc_path);
     let parent = design_path.parent();
@@ -177,6 +188,7 @@ pub fn lightweight_default_task_doc_path(design_doc_path: &str) -> String {
         _ => task_file_name,
     }
 }
+
 pub fn lightweight_notes_with_settings(
     notes: &str,
     task_doc_path: &str,
@@ -201,6 +213,7 @@ pub fn lightweight_notes_with_settings(
     );
     notes_with_setting(&updated, LIGHTWEIGHT_TASK_DOC_CYCLE_NOTE_KEY, "0")
 }
+
 pub fn lightweight_notes_with_repo_configuration(
     notes: &str,
     repo_configuration: LightweightRepoConfiguration,
@@ -211,6 +224,7 @@ pub fn lightweight_notes_with_repo_configuration(
         repo_configuration.note_value(),
     )
 }
+
 pub fn lightweight_notes_with_validation_provider(
     notes: &str,
     validation_provider: &str,
@@ -221,6 +235,7 @@ pub fn lightweight_notes_with_validation_provider(
         validation_provider.trim(),
     )
 }
+
 pub fn lightweight_publish_failure_should_respawn(
     run: &CoordinationRun,
     task: &CoordinationTask,
@@ -229,6 +244,7 @@ pub fn lightweight_publish_failure_should_respawn(
         && task.kind == CoordinationTaskKind::GeneratedWriteTask
         && task.attempt_count < task.max_attempts.max(1)
 }
+
 pub fn lightweight_publish_failure_prompt(prompt: &str, failure_message: &str) -> String {
     let base = prompt
         .split_once(LIGHTWEIGHT_PUBLISH_RECOVERY_MARKER)
@@ -239,9 +255,48 @@ pub fn lightweight_publish_failure_prompt(prompt: &str, failure_message: &str) -
         marker = LIGHTWEIGHT_PUBLISH_RECOVERY_MARKER,
     )
 }
+
 pub fn lightweight_task_has_publish_recovery(task: &CoordinationTask) -> bool {
     task.prompt.contains(LIGHTWEIGHT_PUBLISH_RECOVERY_MARKER)
 }
+
+pub fn requeue_lightweight_publish_failure(
+    run_id: &str,
+    task: &mut CoordinationTask,
+    provider_name: &str,
+    failure_message: &str,
+) -> Result<bool> {
+    let run = load_run(run_id)?;
+    if !lightweight_publish_failure_should_respawn(&run, task) {
+        return Ok(false);
+    }
+
+    let now = Utc::now();
+    let current_attempt = task.attempt_count.max(1);
+    task.prompt = lightweight_publish_failure_prompt(&task.prompt, failure_message);
+    task.status = CoordinationTaskStatus::Queued;
+    task.claimed_by = None;
+    task.artifact_summary = Some(failure_message.to_string());
+    task.updated_at = now;
+    write_json_atomic(&task_path(run_id, &task.task_id), task)?;
+    index_task(task);
+    let _ = fs::remove_file(claim_path(run_id, &task.task_id));
+    append_event_with_provider(
+        run_id,
+        "task_retry_scheduled",
+        Some(&task.task_id),
+        Some(provider_name),
+        task.task_category,
+        task.provider_hint.as_deref(),
+        &format!(
+            "Retry scheduled: {} after automatic git publish failed on attempt {}/{}. Requeued the same lightweight task so the worker can repair the publish blocker and finish the commit/push. {}",
+            task.title, current_attempt, task.max_attempts, failure_message
+        ),
+    )?;
+    sync_run_summary_after_task_update(run_id, now)?;
+    Ok(true)
+}
+
 pub fn lightweight_generated_task_provider(
     run: &CoordinationRun,
     provider: Option<&str>,
@@ -257,21 +312,26 @@ pub fn lightweight_generated_task_provider(
     let providers = lightweight_config_from_run(run).worker_providers;
     providers.get(index % providers.len()).cloned()
 }
+
 pub fn lightweight_task_splitter_provider(run: &CoordinationRun) -> String {
     lightweight_config_from_run(run).task_splitter_provider
 }
+
 pub fn lightweight_current_task_doc_path(run: &CoordinationRun) -> String {
     lightweight_config_from_run(run).task_doc_path
 }
+
 pub fn lightweight_next_task_doc_path_for_run(run: &CoordinationRun) -> String {
     let config = lightweight_config_from_run(run);
     let current_cycle =
         lightweight_task_doc_cycle_for_path(&config.task_doc_path).unwrap_or(config.task_doc_cycle);
     lightweight_next_task_doc_path(&config.task_doc_path, current_cycle + 1)
 }
+
 pub fn lightweight_status_doc_path_for_run(run: &CoordinationRun) -> String {
     lightweight_status_doc_path(&lightweight_current_task_doc_path(run))
 }
+
 fn lightweight_status_doc_path(task_doc_path: &str) -> String {
     let path = Path::new(task_doc_path);
     let parent = path.parent();
@@ -292,6 +352,7 @@ fn lightweight_status_doc_path(task_doc_path: &str) -> String {
         _ => file_name,
     }
 }
+
 pub fn refresh_lightweight_status_projection(run_id: &str) -> Result<()> {
     let run = load_run(run_id)?;
     if run.workflow_mode != AutonomousWorkflowMode::LightweightImplementation {
@@ -310,6 +371,7 @@ pub fn refresh_lightweight_status_projection(run_id: &str) -> Result<()> {
     .with_context(|| format!("failed to write {}", status_doc_path.display()))?;
     Ok(())
 }
+
 pub fn refresh_lightweight_broker_snapshot(run_id: &str) -> Result<LightweightBrokerSnapshot> {
     let run = load_run(run_id)?;
     if run.workflow_mode != AutonomousWorkflowMode::LightweightImplementation {
@@ -334,6 +396,7 @@ pub fn refresh_lightweight_broker_snapshot(run_id: &str) -> Result<LightweightBr
     write_json_atomic(&lightweight_broker_snapshot_path(run_id), &snapshot)?;
     Ok(snapshot)
 }
+
 pub fn load_lightweight_broker_snapshot(run_id: &str) -> Result<LightweightBrokerSnapshot> {
     let raw = fs::read_to_string(lightweight_broker_snapshot_path(run_id)).with_context(|| {
         format!(
@@ -343,11 +406,13 @@ pub fn load_lightweight_broker_snapshot(run_id: &str) -> Result<LightweightBroke
     })?;
     Ok(serde_json::from_str(&raw)?)
 }
+
 pub fn load_lightweight_source_tasks(run_id: &str) -> Result<Vec<LightweightSourceTaskRecord>> {
     let raw = fs::read_to_string(lightweight_source_tasks_path(run_id))
         .with_context(|| format!("failed to read lightweight source tasks for run {}", run_id))?;
     Ok(serde_json::from_str(&raw)?)
 }
+
 pub fn load_lightweight_execution_tasks(
     run_id: &str,
 ) -> Result<Vec<LightweightExecutionTaskRecord>> {
@@ -359,11 +424,13 @@ pub fn load_lightweight_execution_tasks(
     })?;
     Ok(serde_json::from_str(&raw)?)
 }
+
 pub fn load_lightweight_pass_records(run_id: &str) -> Result<Vec<LightweightPassRecord>> {
     let raw = fs::read_to_string(lightweight_passes_path(run_id))
         .with_context(|| format!("failed to read lightweight pass records for run {}", run_id))?;
     Ok(serde_json::from_str(&raw)?)
 }
+
 fn build_lightweight_broker_snapshot(
     run_id: &str,
     run: &CoordinationRun,
@@ -407,6 +474,7 @@ fn build_lightweight_broker_snapshot(
         refreshed_at: run.updated_at,
     }
 }
+
 fn build_lightweight_execution_task_records(
     tasks: &[CoordinationTask],
 ) -> Vec<LightweightExecutionTaskRecord> {
@@ -435,6 +503,7 @@ fn build_lightweight_execution_task_records(
         })
         .collect()
 }
+
 fn build_lightweight_pass_records(
     run: &CoordinationRun,
     source_tasks: &[LightweightSourceTaskRecord],
@@ -465,6 +534,7 @@ fn build_lightweight_pass_records(
         updated_at: run.updated_at,
     }]
 }
+
 fn parse_lightweight_source_tasks(
     run: &CoordinationRun,
     task_doc_path: &str,
@@ -517,6 +587,7 @@ fn parse_lightweight_source_tasks(
 
     source_tasks
 }
+
 fn parse_markdown_heading(line: &str) -> Option<(usize, &str)> {
     let trimmed = line.trim();
     let level = trimmed.chars().take_while(|ch| *ch == '#').count();
@@ -526,6 +597,7 @@ fn parse_markdown_heading(line: &str) -> Option<(usize, &str)> {
     let title = trimmed[level..].trim();
     (!title.is_empty()).then_some((level, title))
 }
+
 fn parse_markdown_task_item(line: &str) -> Option<(bool, &str)> {
     let trimmed = line.trim_start();
     trimmed
@@ -544,6 +616,7 @@ fn parse_markdown_task_item(line: &str) -> Option<(bool, &str)> {
         .or_else(|| trimmed.strip_prefix("+ ").map(|title| (false, title)))
         .or_else(|| parse_numbered_markdown_item(trimmed).map(|title| (false, title)))
 }
+
 fn parse_numbered_markdown_item(line: &str) -> Option<&str> {
     let digits = line.chars().take_while(|ch| ch.is_ascii_digit()).count();
     if digits == 0 {
@@ -553,6 +626,7 @@ fn parse_numbered_markdown_item(line: &str) -> Option<&str> {
         .strip_prefix(". ")
         .or_else(|| line[digits..].strip_prefix(") "))
 }
+
 fn lightweight_source_task_base_id(section_path: &[String], title: &str) -> String {
     let mut parts = section_path
         .iter()
@@ -561,6 +635,7 @@ fn lightweight_source_task_base_id(section_path: &[String], title: &str) -> Stri
     parts.push(lightweight_source_task_slug(title));
     format!("source-task-{}", parts.join("--"))
 }
+
 fn lightweight_source_task_slug(value: &str) -> String {
     let mut slug = String::new();
     let mut last_was_dash = false;
@@ -580,6 +655,7 @@ fn lightweight_source_task_slug(value: &str) -> String {
         slug
     }
 }
+
 fn render_lightweight_status_projection(
     snapshot: &LightweightBrokerSnapshot,
     execution_tasks: &[LightweightExecutionTaskRecord],
@@ -656,6 +732,7 @@ fn render_lightweight_status_projection(
     rendered.push(String::new());
     rendered.join("\n")
 }
+
 fn lightweight_task_status_label(status: CoordinationTaskStatus) -> &'static str {
     match status {
         CoordinationTaskStatus::Queued => "queued",
@@ -668,9 +745,11 @@ fn lightweight_task_status_label(status: CoordinationTaskStatus) -> &'static str
         CoordinationTaskStatus::Canceled => "canceled",
     }
 }
+
 fn lightweight_task_kind_label(kind: CoordinationTaskKind) -> &'static str {
     generated_task_label(&kind)
 }
+
 fn lightweight_recovery_action_label(action: TaskRecoveryAction) -> &'static str {
     match action {
         TaskRecoveryAction::None => "none",
@@ -680,11 +759,13 @@ fn lightweight_recovery_action_label(action: TaskRecoveryAction) -> &'static str
         TaskRecoveryAction::ManualIntervention => "manual_intervention",
     }
 }
+
 pub fn lightweight_repo_configuration_for_run(
     run: &CoordinationRun,
 ) -> LightweightRepoConfiguration {
     lightweight_config_from_run(run).repo_configuration
 }
+
 pub fn lightweight_review_write_scope(run: &CoordinationRun) -> Vec<String> {
     if run.workflow_mode == AutonomousWorkflowMode::GithubBranchFix {
         return Vec::new();
@@ -698,6 +779,7 @@ pub fn lightweight_review_write_scope(run: &CoordinationRun) -> Vec<String> {
         lightweight_next_task_doc_path_for_run(run),
     ]
 }
+
 pub fn lightweight_review_task_is_superseded(
     tasks: &[CoordinationTask],
     task: &CoordinationTask,
@@ -708,6 +790,7 @@ pub fn lightweight_review_task_is_superseded(
                 && candidate.parent_task_id.as_deref() == Some(task.task_id.as_str())
         })
 }
+
 pub fn lightweight_review_should_recurse(
     run: &CoordinationRun,
     review_task: &CoordinationTask,
@@ -724,6 +807,7 @@ pub fn lightweight_review_should_recurse(
     }
     !lightweight_review_has_duplicate_blocker_signature(&run.run_id, review_task, artifact)
 }
+
 pub fn lightweight_review_has_actionable_repo_local_work(artifact: &TaskArtifact) -> bool {
     artifact
         .report
@@ -735,6 +819,7 @@ pub fn lightweight_review_has_actionable_repo_local_work(artifact: &TaskArtifact
             Err(_) => true,
         })
 }
+
 pub fn lightweight_review_has_duplicate_blocker_signature(
     run_id: &str,
     review_task: &CoordinationTask,
@@ -760,6 +845,7 @@ pub fn lightweight_review_has_duplicate_blocker_signature(
     let parent_signature = lightweight_review_blocker_signature(&parent_artifact);
     current_signature.is_some() && current_signature == parent_signature
 }
+
 fn lightweight_review_blocker_signature(artifact: &TaskArtifact) -> Option<String> {
     if !matches!(
         artifact.report.outcome,
@@ -813,6 +899,7 @@ fn lightweight_review_blocker_signature(artifact: &TaskArtifact) -> Option<Strin
         ))
     }
 }
+
 fn lightweight_blocker_text_signature(value: &str) -> String {
     value
         .chars()
@@ -823,6 +910,7 @@ fn lightweight_blocker_text_signature(value: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+
 pub fn lightweight_task_omits_changed_files(
     run: &CoordinationRun,
     _task: &CoordinationTask,
@@ -831,6 +919,7 @@ pub fn lightweight_task_omits_changed_files(
         .map(|behavior| !behavior.tracks_changed_files())
         .unwrap_or(false)
 }
+
 pub fn lightweight_generated_write_claims_ignore_scope_conflicts(
     run: &CoordinationRun,
     task: &CoordinationTask,
@@ -838,6 +927,7 @@ pub fn lightweight_generated_write_claims_ignore_scope_conflicts(
     uses_lightweight_runtime_mode(&run.workflow_mode)
         && task.kind == CoordinationTaskKind::GeneratedWriteTask
 }
+
 pub fn lightweight_write_scope_conflict_is_coordination_only(
     run: &CoordinationRun,
     candidate_task: &CoordinationTask,
@@ -876,6 +966,7 @@ pub fn lightweight_write_scope_conflict_is_coordination_only(
         .collect::<Vec<_>>();
     !scopes_conflict(&filtered_candidate, &filtered_other)
 }
+
 pub fn update_lightweight_task_doc_after_review(
     run: &mut CoordinationRun,
     task: &CoordinationTask,
@@ -901,6 +992,7 @@ pub fn update_lightweight_task_doc_after_review(
     );
     Some(next_path)
 }
+
 pub fn lightweight_validate_config(
     task_doc_path: &str,
     task_splitter_provider: &str,
@@ -933,18 +1025,22 @@ pub fn lightweight_validate_config(
     }
     Ok(())
 }
+
 pub fn uses_lightweight_runtime_mode(mode: &AutonomousWorkflowMode) -> bool {
     matches!(
         mode,
         AutonomousWorkflowMode::LightweightImplementation | AutonomousWorkflowMode::GithubBranchFix
     )
 }
+
 pub fn lightweight_runtime_note_setting_value<'a>(notes: &'a str, key: &str) -> Option<&'a str> {
     note_setting_value(notes, key)
 }
+
 pub fn lightweight_runtime_notes_with_setting(notes: &str, key: &str, value: &str) -> String {
     notes_with_setting(notes, key, value)
 }
+
 pub fn validate_lightweight_notes(notes: &str, design_doc_path: &str) -> Result<()> {
     let task_doc_path = note_setting_value(notes, LIGHTWEIGHT_TASK_DOC_NOTE_KEY)
         .map(str::to_string)
@@ -969,6 +1065,7 @@ pub fn validate_lightweight_notes(notes: &str, design_doc_path: &str) -> Result<
         &worker_providers,
     )
 }
+
 pub fn parse_lightweight_worker_providers(value: Option<&str>) -> Option<Vec<String>> {
     let parsed = value
         .unwrap_or_default()
@@ -979,12 +1076,14 @@ pub fn parse_lightweight_worker_providers(value: Option<&str>) -> Option<Vec<Str
         .collect::<Vec<_>>();
     (!parsed.is_empty()).then_some(parsed)
 }
+
 pub fn lightweight_prompt_prefix(task_doc_path: &str) -> String {
     format!(
         "The active task list document path for this run is `{}`. Generated implementation workers must treat that document as read-only. Do not edit, rewrite, reorder, delete, summarize, or regenerate it from generated worker tasks. Review owns task-list progression and next-pass task-list updates.",
         task_doc_path
     )
 }
+
 pub fn lightweight_generated_task_prompt(
     run: &CoordinationRun,
     _kind: &CoordinationTaskKind,
@@ -999,6 +1098,7 @@ pub fn lightweight_generated_task_prompt(
         prompt
     )
 }
+
 pub fn lightweight_review_prompt(run: &CoordinationRun) -> String {
     if run.workflow_mode == AutonomousWorkflowMode::GithubBranchFix {
         return github_branch_fix_review_prompt(run);
@@ -1014,6 +1114,7 @@ pub fn lightweight_review_prompt(run: &CoordinationRun) -> String {
         next_task_doc_path
     )
 }
+
 fn lightweight_next_task_doc_path(current_path: &str, next_cycle: u32) -> String {
     let path = Path::new(current_path);
     let parent = path.parent();
@@ -1039,6 +1140,7 @@ fn lightweight_next_task_doc_path(current_path: &str, next_cycle: u32) -> String
         _ => file_name,
     }
 }
+
 fn lightweight_task_doc_cycle_for_path(task_doc_path: &str) -> Option<u32> {
     let stem = Path::new(task_doc_path)
         .file_stem()
@@ -1046,6 +1148,7 @@ fn lightweight_task_doc_cycle_for_path(task_doc_path: &str) -> Option<u32> {
     let (_, suffix) = stem.rsplit_once("-pass-")?;
     suffix.parse::<u32>().ok()
 }
+
 fn note_setting_value<'a>(notes: &'a str, key: &str) -> Option<&'a str> {
     notes.lines().find_map(|line| {
         let trimmed = line.trim();
@@ -1056,6 +1159,7 @@ fn note_setting_value<'a>(notes: &'a str, key: &str) -> Option<&'a str> {
         })
     })
 }
+
 fn notes_with_setting(notes: &str, key: &str, value: &str) -> String {
     let prefix = format!("{key}=");
     let mut lines = notes

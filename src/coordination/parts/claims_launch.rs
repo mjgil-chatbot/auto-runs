@@ -336,6 +336,94 @@ fn spawned_worker_timeout_detail(
         timeout.as_secs() / 60
     ))
 }
+fn release_claim_after_spawned_worker_exit(
+    run_id: &str,
+    task_id: &str,
+    worker_pid: u32,
+    detail: &str,
+) -> Result<()> {
+    let claim = match load_claim(run_id, task_id) {
+        Ok(claim) => claim,
+        Err(_) => return Ok(()),
+    };
+
+    let err = anyhow::anyhow!(
+        "Detached worker PID {} exited before reaching a terminal artifact. {}",
+        worker_pid,
+        detail
+    );
+
+    if claim.instance_pid == worker_pid {
+        return release_claim_after_worker_failure(run_id, task_id, worker_pid, &err);
+    }
+
+    if claim.worker_pid != Some(worker_pid) {
+        return Ok(());
+    }
+
+    let now = Utc::now();
+    let mut task = load_task(run_id, task_id)?;
+    if !matches!(
+        task.status,
+        CoordinationTaskStatus::Running | CoordinationTaskStatus::Claiming
+    ) {
+        let _ = fs::remove_file(claim_path(run_id, task_id));
+        return Ok(());
+    }
+    task.claimed_by = None;
+    task.updated_at = now;
+
+    if task.attempt_count >= task.max_attempts.max(1) {
+        task.status = CoordinationTaskStatus::Failed;
+        task.artifact_summary = Some(err.to_string());
+        write_json_atomic(&task_path(run_id, task_id), &task)?;
+        index_task(&task);
+        let _ = fs::remove_file(claim_path(run_id, task_id));
+        append_event(
+            run_id,
+            "task_failed",
+            Some(task_id),
+            &format!(
+                "Detached worker exited before task execution for {}. Marked as failed after {}/{} attempts. {}",
+                task.title,
+                task.attempt_count,
+                task.max_attempts.max(1),
+                err
+            ),
+        )?;
+        append_event(
+            run_id,
+            "task_exhausted_attempts",
+            Some(task_id),
+            &format!(
+                "Detached worker exited before task execution for {}. Marked as failed after {}/{} attempts. {}",
+                task.title,
+                task.attempt_count,
+                task.max_attempts.max(1),
+                err
+            ),
+        )?;
+    } else {
+        task.status = CoordinationTaskStatus::Queued;
+        write_json_atomic(&task_path(run_id, task_id), &task)?;
+        index_task(&task);
+        let _ = fs::remove_file(claim_path(run_id, task_id));
+        append_event(
+            run_id,
+            "task_requeued",
+            Some(task_id),
+            &format!(
+                "Detached worker exited before task execution for {}. Returned task to queue (attempt {}/{}). {}",
+                task.title,
+                task.attempt_count,
+                task.max_attempts.max(1),
+                err
+            ),
+        )?;
+    }
+    sync_run_summary_after_task_update(run_id, task.updated_at)?;
+    Ok(())
+}
 pub fn spawn_daemonized(
     target: &Path,
     args: &[&str],
@@ -373,6 +461,121 @@ pub fn spawn_daemonized(
         .stderr(std::process::Stdio::null());
     cmd.spawn()
         .with_context(|| format!("failed to spawn {}", target.display()))
+}
+pub fn spawn_provider_task_process(
+    task: &CoordinationTask,
+    provider: &str,
+    launcher_pid: u32,
+) -> Result<()> {
+    let run = load_run(&task.run_id)?;
+    let worker_bin = resolve_autonomous_worker_binary()?;
+    let provider_name = task.assigned_provider.as_deref().unwrap_or(provider);
+    let worker_args = autonomous_worker_spawn_args(task, provider_name, launcher_pid);
+    let args = worker_args.iter().map(String::as_str).collect::<Vec<_>>();
+
+    let mut env_vars: Vec<(&str, String)> = vec![];
+    if run.execution_environment == AutonomousExecutionEnvironment::Runsc {
+        let effective_includes = effective_runsc_workspace_includes(&run, Some(task));
+        env_vars.push(("RUST_CHATBOT_AUTONOMOUS_EXECUTION_ENV", "runsc".to_string()));
+        env_vars.push((
+            "RUST_CHATBOT_AUTONOMOUS_RUNSC_WORKSPACE_INCLUDES",
+            serde_json::to_string(&effective_includes).unwrap_or_else(|_| "[]".to_string()),
+        ));
+    }
+
+    let stderr_log_path = worker_stderr_log_path(&task.run_id, &task.task_id);
+    let mut child = spawn_daemonized_with_stderr(&worker_bin, &args, &env_vars, &stderr_log_path)
+        .with_context(|| {
+        format!(
+            "failed to spawn daemonized auto-runs-worker for run {} task {}",
+            task.run_id, task.task_id
+        )
+    })?;
+    let worker_pid = child.id();
+    let _ = record_worker_spawned(&task.run_id, &task.task_id, launcher_pid, worker_pid);
+
+    let task_run_id = task.run_id.clone();
+    let task_id = task.task_id.clone();
+    let launcher_pid_for_wait = launcher_pid;
+    let stderr_log_path_for_wait = stderr_log_path.clone();
+    let forced_exit_detail = Arc::new(Mutex::new(None::<String>));
+    let forced_exit_detail_for_wait = Arc::clone(&forced_exit_detail);
+    let watchdog_task = task.clone();
+    let started_at = std::time::Instant::now();
+    let mut next_launcher_heartbeat =
+        std::time::Instant::now() + Duration::from_secs(LAUNCHER_CLAIM_HEARTBEAT_BRIDGE_SECS);
+    thread::spawn(move || loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    let raw_detail = forced_exit_detail_for_wait
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner())
+                        .take()
+                        .unwrap_or_else(|| format_worker_exit_status(status));
+                    let detail = worker_exit_detail(&raw_detail, &stderr_log_path_for_wait);
+                    let _ = record_worker_exited(&task_run_id, &task_id, worker_pid, &detail);
+                    let _ = release_claim_after_spawned_worker_exit(
+                        &task_run_id,
+                        &task_id,
+                        worker_pid,
+                        &detail,
+                    );
+                    debug!(
+                        run_id = %task_run_id,
+                        task_id = %task_id,
+                        status = %detail,
+                        "spawned worker process exited with non-zero status"
+                    );
+                }
+                return;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= next_launcher_heartbeat {
+                    let _ = heartbeat_claim(&task_run_id, &task_id, launcher_pid_for_wait);
+                    next_launcher_heartbeat = std::time::Instant::now()
+                        + Duration::from_secs(LAUNCHER_CLAIM_HEARTBEAT_BRIDGE_SECS);
+                }
+                let mut forced_detail = forced_exit_detail_for_wait
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner());
+                if forced_detail.is_none() {
+                    let now = Utc::now();
+                    if let Some(detail) = spawned_worker_adoption_stall_detail(
+                        &task_run_id,
+                        &task_id,
+                        launcher_pid_for_wait,
+                        worker_pid,
+                        now,
+                    ) {
+                        *forced_detail = Some(detail);
+                        terminate_spawned_worker_process(&mut child);
+                    } else if let Some(detail) =
+                        spawned_worker_stall_detail(&task_run_id, &task_id, worker_pid, now)
+                    {
+                        *forced_detail = Some(detail);
+                        terminate_spawned_worker_process(&mut child);
+                    } else if let Some(detail) =
+                        spawned_worker_timeout_detail(&watchdog_task, started_at)
+                    {
+                        *forced_detail = Some(detail);
+                        terminate_spawned_worker_process(&mut child);
+                    }
+                }
+            }
+            Err(err) => {
+                warn!(
+                    run_id = %task_run_id,
+                    task_id = %task_id,
+                    error = %err,
+                    "failed to wait on spawned worker process"
+                );
+                return;
+            }
+        }
+        thread::sleep(Duration::from_millis(SPAWNED_WORKER_EXIT_POLL_MS));
+    });
+    Ok(())
 }
 pub fn spawn_daemonized_with_stderr(
     target: &Path,
@@ -428,6 +631,61 @@ pub fn release_claim_after_launch_failure(
     err: &anyhow::Error,
 ) -> Result<()> {
     finalize_launch_failure(run_id, task_id, launcher_pid, err, true)
+}
+pub fn release_claim_after_worker_failure(
+    run_id: &str,
+    task_id: &str,
+    worker_pid: u32,
+    err: &anyhow::Error,
+) -> Result<()> {
+    let now = Utc::now();
+    let mut task = load_task(run_id, task_id)?;
+    let claim_owned_by_worker = load_claim(run_id, task_id)
+        .map(|claim| claim.instance_pid == worker_pid)
+        .unwrap_or_else(|_| task.claimed_by == Some(worker_pid));
+    if !claim_owned_by_worker {
+        return Ok(());
+    }
+    if matches!(
+        task.status,
+        CoordinationTaskStatus::Running | CoordinationTaskStatus::Claiming
+    ) {
+        let exhausted = task.attempt_count >= task.max_attempts.max(1);
+        task.status = if exhausted {
+            CoordinationTaskStatus::Failed
+        } else {
+            CoordinationTaskStatus::Queued
+        };
+        task.claimed_by = None;
+        task.updated_at = now;
+        if exhausted && task.artifact_summary.is_none() {
+            task.artifact_summary = Some(err.to_string());
+        }
+        write_json_atomic(&task_path(run_id, task_id), &task)?;
+        index_task(&task);
+        let _ = fs::remove_file(claim_path(run_id, task_id));
+        append_event(
+            run_id,
+            if exhausted {
+                "task_exhausted_attempts"
+            } else {
+                "task_requeued"
+            },
+            Some(task_id),
+            &format!(
+                "Worker failed after claim adoption for {} (attempt {}/{}). {}",
+                task.title,
+                task.attempt_count,
+                task.max_attempts.max(1),
+                err
+            ),
+        )?;
+        sync_run_summary_after_task_update(run_id, task.updated_at)?;
+        return Ok(());
+    }
+
+    let _ = fs::remove_file(claim_path(run_id, task_id));
+    Ok(())
 }
 pub fn finalize_launch_failure(
     run_id: &str,
