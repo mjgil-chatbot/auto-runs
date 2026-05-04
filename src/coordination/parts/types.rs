@@ -1,5 +1,17 @@
 use super::*;
 #[allow(unused_imports)]
+use crate::config;
+#[allow(unused_imports)]
+use crate::data::ChatSession;
+#[allow(unused_imports)]
+use crate::memory;
+#[allow(unused_imports)]
+use crate::model::ModelProvider;
+#[allow(unused_imports)]
+use crate::provider_bridge::{
+    autonomous_provider_overrides, call_provider_cli_stream_with_overrides,
+};
+#[allow(unused_imports)]
 use crate::{
     AutonomousExecutionEnvironment, AutonomousWorkflowMode, ReviewFixMode, ReviewScope, TurnPolicy,
 };
@@ -34,24 +46,30 @@ use std::thread;
 use std::time::Duration;
 #[allow(unused_imports)]
 use uuid::Uuid;
+
 /// Worker heartbeat interval in seconds.
 pub const TASK_HEARTBEAT_SECS: u64 = 60;
+
 /// Worker heartbeat staleness threshold in seconds. If the worker fails to
 /// heartbeat inside this window, the launcher/driver should treat it as dead.
 pub const TASK_HEARTBEAT_STALE_SECS: i64 = 5 * 60;
+
 /// Default maximum number of attempts before a task is considered permanently failed.
 pub const DEFAULT_TASK_MAX_ATTEMPTS: u32 = 3;
 pub const DEFAULT_GENERATED_TASK_ESTIMATED_MINUTES: u32 = 15;
 pub const MIN_TASK_ESTIMATED_MINUTES: u32 = 1;
 pub const MAX_TASK_ESTIMATED_MINUTES: u32 = 180;
+
 /// System prompt injected to all provider task executions.
 pub const TASK_SYSTEM_PROMPT: &str =
     "You are executing one task inside an autonomous coordination run. Use the task prompt and dependency artifacts. If the task declares a non-empty write scope, you may modify files only inside that declared write scope. If the task says to return JSON only, return exactly one JSON object and put any markdown, code, or file contents inside the JSON string fields, usually `details`. Do not emit raw markdown or commentary outside the JSON object. Be concise and action-oriented.";
+
 /// Path to the task report validation script.
 pub const TASK_REPORT_VALIDATOR: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/scripts/validate_autonomous_task_report.py"
 );
+
 pub fn effective_runsc_workspace_includes(
     run: &CoordinationRun,
     _task: Option<&CoordinationTask>,
@@ -67,6 +85,7 @@ pub fn effective_runsc_workspace_includes(
     }
     includes
 }
+
 pub fn scope_to_runsc_include(workspace_root: &Path, scope: &str) -> Option<String> {
     let trimmed = scope.trim();
     if trimmed.is_empty() {
@@ -98,6 +117,7 @@ pub fn scope_to_runsc_include(workspace_root: &Path, scope: &str) -> Option<Stri
 
     widest_existing.map(|path| path.to_string_lossy().into_owned())
 }
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CoordinationRunStatus {
@@ -111,6 +131,7 @@ pub enum CoordinationRunStatus {
     Failed,
     Canceled,
 }
+
 impl CoordinationRunStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -123,7 +144,9 @@ impl CoordinationRunStatus {
             Self::Failed => "failed",
             Self::Canceled => "canceled",
         }
-    }}
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CoordinationTaskStatus {
@@ -137,6 +160,7 @@ pub enum CoordinationTaskStatus {
     Failed,
     Canceled,
 }
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CoordinationTaskKind {
@@ -160,6 +184,7 @@ pub enum CoordinationTaskKind {
     PerfBench,
     PerfEvaluate,
 }
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CoordinationTaskOutcome {
@@ -170,6 +195,7 @@ pub enum CoordinationTaskOutcome {
     Partial,
     Failed,
 }
+
 impl CoordinationTaskOutcome {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -179,7 +205,9 @@ impl CoordinationTaskOutcome {
             Self::Partial => "partial",
             Self::Failed => "failed",
         }
-    }}
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskFailureKind {
@@ -195,6 +223,7 @@ pub enum TaskFailureKind {
     DependencyDrift,
     WorkspaceMutation,
 }
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskRecoveryAction {
@@ -205,10 +234,12 @@ pub enum TaskRecoveryAction {
     ReconcileState,
     ManualIntervention,
 }
+
 pub const PROVIDER_CAPABILITY_REGISTRY_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/workflow-registry/providers.json"
 );
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskCategory {
@@ -223,6 +254,7 @@ pub enum TaskCategory {
     DocWrite,
     Research,
 }
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptFamily {
@@ -230,6 +262,7 @@ pub enum PromptFamily {
     Mechanics,
     Principles,
 }
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CostTier {
@@ -239,7 +272,9 @@ pub enum CostTier {
     High,
     Premium,
 }
+
 pub use auto_runs_contracts::AgentRole;
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelClass {
@@ -248,6 +283,7 @@ pub enum ModelClass {
     Standard,
     Fast,
 }
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolAccess {
@@ -256,6 +292,7 @@ pub enum ToolAccess {
     #[default]
     Execution,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct AgentProfile {
     #[serde(default)]
@@ -265,6 +302,7 @@ pub struct AgentProfile {
     #[serde(default)]
     pub tool_access: ToolAccess,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct ProviderCapabilityProfile {
     pub provider_id: String,
@@ -289,11 +327,13 @@ pub struct ProviderCapabilityProfile {
     #[serde(default)]
     pub notes: String,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct ProviderCapabilityRegistry {
     #[serde(default)]
     pub providers: Vec<ProviderCapabilityProfile>,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct TaskExecutionReport {
     #[serde(default)]
@@ -323,6 +363,7 @@ pub struct TaskExecutionReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_action: Option<TaskRecoveryAction>,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default, JsonSchema)]
 pub struct GeneratedTaskSpec {
     pub title: String,
@@ -343,12 +384,14 @@ pub struct GeneratedTaskSpec {
     #[serde(default)]
     pub acceptance_checks: Vec<String>,
 }
+
 #[derive(Deserialize)]
 pub struct RalphVerificationResult {
     pub complete: bool,
     #[serde(default)]
     pub reason: String,
 }
+
 #[derive(Deserialize)]
 pub struct RalphExecutionResult {
     pub outcome: CoordinationTaskOutcome,
@@ -360,12 +403,14 @@ pub struct RalphExecutionResult {
     #[serde(default)]
     pub reason: String,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ProviderCooldown {
     pub unavailable_until: DateTime<Utc>,
     #[serde(default)]
     pub reason: String,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CoordinationRun {
     pub run_id: String,
@@ -410,6 +455,7 @@ pub struct CoordinationRun {
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub processed_mutation_batch_ids: BTreeSet<String>,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CoordinationTask {
     pub task_id: String,
@@ -466,6 +512,7 @@ pub struct CoordinationTask {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
 impl Default for CoordinationTask {
     fn default() -> Self {
         let now = Utc::now();
@@ -504,6 +551,7 @@ impl Default for CoordinationTask {
         }
     }
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TaskClaim {
     pub run_id: String,
@@ -529,6 +577,7 @@ pub struct TaskClaim {
     pub worker_exit_detail: Option<String>,
     pub last_heartbeat_at: DateTime<Utc>,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CoordinationEvent {
     pub at: DateTime<Utc>,
@@ -543,6 +592,7 @@ pub struct CoordinationEvent {
     pub fallback_from: Option<String>,
     pub message: String,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AgentPresence {
     pub provider: String,
@@ -553,6 +603,7 @@ pub struct AgentPresence {
     pub visible_workspaces: Vec<String>,
     pub last_heartbeat_at: DateTime<Utc>,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TaskArtifact {
     pub run_id: String,
@@ -569,6 +620,7 @@ pub struct TaskArtifact {
     #[serde(default)]
     pub report: TaskExecutionReport,
 }
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CoordinationMutationKind {
@@ -577,6 +629,7 @@ pub enum CoordinationMutationKind {
     PublishWorkspaceDelta,
     ReconcileRun,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CoordinationMutationBatch {
     pub batch_id: String,
@@ -590,6 +643,7 @@ pub struct CoordinationMutationBatch {
     #[serde(default)]
     pub notes: String,
 }
+
 #[derive(Clone, Debug)]
 pub struct UpsertRunInput {
     pub existing_run_id: Option<String>,
@@ -615,6 +669,7 @@ pub struct UpsertRunInput {
     pub council_turn_policy: Option<TurnPolicy>,
     pub council_max_turns: Option<u32>,
 }
+
 #[derive(Clone, Debug)]
 pub struct PresenceInput {
     pub provider: String,
@@ -623,11 +678,13 @@ pub struct PresenceInput {
     pub current_load: usize,
     pub visible_workspaces: Vec<String>,
 }
+
 #[derive(Clone, Debug)]
 pub struct CoordinationRunSnapshot {
     pub run: CoordinationRun,
     pub tasks: Vec<CoordinationTask>,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct LightweightTaskDocumentRecord {
     pub active_path: String,
@@ -636,6 +693,7 @@ pub struct LightweightTaskDocumentRecord {
     pub cycle: u32,
     pub updated_at: DateTime<Utc>,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct LightweightSourceTaskRecord {
     pub source_task_id: String,
@@ -645,6 +703,7 @@ pub struct LightweightSourceTaskRecord {
     pub title: String,
     pub completed: bool,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct LightweightExecutionTaskRecord {
     pub execution_task_id: String,
@@ -674,12 +733,14 @@ pub struct LightweightExecutionTaskRecord {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LightweightPassStatus {
     Active,
     Completed,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct LightweightPassRecord {
     pub pass_id: String,
@@ -693,6 +754,7 @@ pub struct LightweightPassRecord {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct LightweightBrokerSnapshot {
     pub run_id: String,
@@ -707,6 +769,7 @@ pub struct LightweightBrokerSnapshot {
     pub pass_count: usize,
     pub refreshed_at: DateTime<Utc>,
 }
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaimLifecyclePhase {
@@ -717,6 +780,7 @@ pub enum ClaimLifecyclePhase {
     TaskExecutionStarted,
     WorkerExited,
 }
+
 impl ClaimLifecyclePhase {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -726,22 +790,29 @@ impl ClaimLifecyclePhase {
             Self::TaskExecutionStarted => "task_execution_started",
             Self::WorkerExited => "worker_exited",
         }
-    }}
+    }
+}
+
 pub fn default_design_doc_path() -> String {
     crate::default_design_doc_path_for_workflow(&AutonomousWorkflowMode::default())
 }
+
 pub const fn default_max_iterations() -> u32 {
     10
 }
+
 pub const fn default_task_max_attempts() -> u32 {
     DEFAULT_TASK_MAX_ATTEMPTS
 }
+
 pub const fn default_execution_generation() -> u32 {
     1
 }
+
 pub const fn default_generated_task_estimated_minutes() -> u32 {
     DEFAULT_GENERATED_TASK_ESTIMATED_MINUTES
 }
+
 pub const fn default_task_estimated_minutes_for_kind(kind: &CoordinationTaskKind) -> u32 {
     match kind {
         CoordinationTaskKind::SurveyWorkspace => 10,
@@ -763,16 +834,20 @@ pub const fn default_task_estimated_minutes_for_kind(kind: &CoordinationTaskKind
         | CoordinationTaskKind::PerfBench => 20,
     }
 }
+
 pub fn effective_dependency_generation(task: &CoordinationTask) -> u32 {
     task.dependency_generation
         .unwrap_or(task.execution_generation)
 }
+
 pub fn worker_heartbeat_stale_at(last_heartbeat_at: DateTime<Utc>) -> DateTime<Utc> {
     last_heartbeat_at + chrono::Duration::seconds(TASK_HEARTBEAT_STALE_SECS)
 }
+
 pub fn claim_heartbeat_stale_at(claim: &TaskClaim) -> DateTime<Utc> {
     worker_heartbeat_stale_at(claim.last_heartbeat_at)
 }
+
 pub fn normalize_task_estimated_minutes(
     estimated_minutes: Option<u32>,
     kind: &CoordinationTaskKind,
@@ -781,6 +856,7 @@ pub fn normalize_task_estimated_minutes(
         .unwrap_or_else(|| default_task_estimated_minutes_for_kind(kind))
         .clamp(MIN_TASK_ESTIMATED_MINUTES, MAX_TASK_ESTIMATED_MINUTES)
 }
+
 /// Typed errors returned by [`heartbeat_claim`] so callers can distinguish
 /// transient I/O failures from ownership-loss events without string matching.
 #[derive(Debug)]
@@ -799,6 +875,7 @@ pub enum ClaimError {
         instance_pid: u32,
     },
 }
+
 impl std::fmt::Display for ClaimError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -813,4 +890,9 @@ impl std::fmt::Display for ClaimError {
         }
     }
 }
+
 impl std::error::Error for ClaimError {}
+
+#[cfg(test)]
+#[path = "types_tests.rs"]
+mod types_tests;

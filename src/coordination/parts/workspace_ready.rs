@@ -1,6 +1,7 @@
 use super::*;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+
 /// Rust project scaffold root. Override with the `AUTO_RUNS_RUST_SCAFFOLD_ROOT` environment variable.
 pub(super) fn rust_scaffold_root() -> String {
     std::env::var("AUTO_RUNS_RUST_SCAFFOLD_ROOT").unwrap_or_else(|_| {
@@ -12,6 +13,7 @@ pub(super) fn rust_scaffold_root() -> String {
             .into_owned()
     })
 }
+
 /// Zig project scaffold root. Override with the `AUTO_RUNS_ZIG_SCAFFOLD_ROOT` environment variable.
 pub(super) fn zig_scaffold_root() -> String {
     std::env::var("AUTO_RUNS_ZIG_SCAFFOLD_ROOT").unwrap_or_else(|_| {
@@ -23,6 +25,7 @@ pub(super) fn zig_scaffold_root() -> String {
             .into_owned()
     })
 }
+
 const RUST_PROJECT_SCAFFOLD_EXCLUDED_ROOTS: [&str; 2] = [".git", "target"];
 const LIGHTWEIGHT_BUILD_ARTIFACT_DIRS: [&str; 3] = ["target", ".zig-cache", "zig-out"];
 const COMMON_LIGHTWEIGHT_GITIGNORE_ENTRIES: [&str; 1] = ["target"];
@@ -60,6 +63,7 @@ git -C "$repo_root" config core.hooksPath .githooks
 
 echo "Configured Git hooks path to .githooks"
 "#;
+
 pub fn ensure_task_workspace_exists(
     run: &CoordinationRun,
     task: &CoordinationTask,
@@ -126,6 +130,7 @@ pub fn ensure_task_workspace_exists(
 
     Ok(true)
 }
+
 fn ensure_lightweight_workspace_ready(
     run: &CoordinationRun,
     task: &CoordinationTask,
@@ -196,6 +201,7 @@ fn ensure_lightweight_workspace_ready(
 
     Ok(())
 }
+
 fn ensure_lightweight_gitignore_hygiene(
     run: &CoordinationRun,
     task: &CoordinationTask,
@@ -227,6 +233,7 @@ fn ensure_lightweight_gitignore_hygiene(
 
     Ok(())
 }
+
 fn repair_lightweight_build_artifact_permissions(
     run: &CoordinationRun,
     task: &CoordinationTask,
@@ -261,6 +268,7 @@ fn repair_lightweight_build_artifact_permissions(
 
     Ok(())
 }
+
 fn maybe_configure_lightweight_repo(
     run: &CoordinationRun,
     task: &CoordinationTask,
@@ -309,6 +317,7 @@ fn maybe_configure_lightweight_repo(
         }
     }
 }
+
 fn apply_rust_project_scaffold_configuration(workspace: &Path) -> Result<()> {
     let scaffold_root_str = rust_scaffold_root();
     let scaffold_root = Path::new(&scaffold_root_str);
@@ -323,6 +332,7 @@ fn apply_rust_project_scaffold_configuration(workspace: &Path) -> Result<()> {
     configure_git_hooks_path(workspace)?;
     Ok(())
 }
+
 fn apply_zig_project_configuration(workspace: &Path) -> Result<()> {
     let scaffold_root_str = zig_scaffold_root();
     let scaffold_root = Path::new(&scaffold_root_str);
@@ -353,6 +363,7 @@ fn apply_zig_project_configuration(workspace: &Path) -> Result<()> {
     run_command(workspace, "./scripts/install-git-hooks.sh", &[])?;
     Ok(())
 }
+
 fn workspace_has_only_docs_directory(workspace: &Path) -> Result<bool> {
     let mut visible_entries = Vec::new();
     for entry in fs::read_dir(workspace)
@@ -379,6 +390,7 @@ fn workspace_has_only_docs_directory(workspace: &Path) -> Result<bool> {
         .is_dir();
     Ok(is_docs && is_dir)
 }
+
 fn copy_repo_configuration_file(source: &Path, destination: &Path, executable: bool) -> Result<()> {
     if !source.is_file() {
         anyhow::bail!("repo configuration source {} is missing", source.display());
@@ -399,6 +411,7 @@ fn copy_repo_configuration_file(source: &Path, destination: &Path, executable: b
     }
     Ok(())
 }
+
 fn copy_repo_configuration_tree(source_root: &Path, destination_root: &Path) -> Result<()> {
     for entry in fs::read_dir(source_root)
         .with_context(|| format!("failed to read {}", source_root.display()))?
@@ -413,6 +426,7 @@ fn copy_repo_configuration_tree(source_root: &Path, destination_root: &Path) -> 
     }
     Ok(())
 }
+
 fn copy_repo_configuration_path(source: &Path, destination: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(source)
         .with_context(|| format!("failed to read {}", source.display()))?;
@@ -435,6 +449,7 @@ fn copy_repo_configuration_path(source: &Path, destination: &Path) -> Result<()>
     let executable = metadata.permissions().mode() & 0o111 != 0;
     copy_repo_configuration_file(source, destination, executable)
 }
+
 fn write_repo_configuration_contents(
     destination: &Path,
     contents: &str,
@@ -451,6 +466,7 @@ fn write_repo_configuration_contents(
     }
     Ok(())
 }
+
 fn append_missing_gitignore_entries(destination: &Path, entries: &[&str]) -> Result<Vec<String>> {
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)
@@ -489,6 +505,7 @@ fn append_missing_gitignore_entries(destination: &Path, entries: &[&str]) -> Res
 
     Ok(added)
 }
+
 fn normalize_gitignore_entry_for_compare(entry: &str) -> String {
     entry
         .trim()
@@ -497,9 +514,11 @@ fn normalize_gitignore_entry_for_compare(entry: &str) -> String {
         .trim_end_matches('/')
         .to_string()
 }
+
 fn configure_git_hooks_path(workspace: &Path) -> Result<()> {
     run_git_command(workspace, &["config", "core.hooksPath", ".githooks"])
 }
+
 fn ensure_executable(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -517,6 +536,7 @@ fn ensure_executable(path: &Path) -> Result<()> {
     }
     Ok(())
 }
+
 fn repair_path_user_permissions(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -553,6 +573,7 @@ fn repair_path_user_permissions(path: &Path) -> Result<()> {
 
     Ok(())
 }
+
 fn ensure_git_identity_configured(workspace: &Path) -> Result<()> {
     if git_config_value(workspace, "user.name")?.is_some()
         && git_config_value(workspace, "user.email")?.is_some()
@@ -566,6 +587,7 @@ fn ensure_git_identity_configured(workspace: &Path) -> Result<()> {
     run_git_command(workspace, &["config", "user.email", user_email.as_str()])?;
     Ok(())
 }
+
 fn preferred_git_user_name() -> String {
     for key in ["GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME", "USER", "USERNAME"] {
         if let Some(value) = std::env::var(key)
@@ -578,6 +600,7 @@ fn preferred_git_user_name() -> String {
     }
     "local-user".to_string()
 }
+
 fn preferred_git_user_email(user_name: &str) -> String {
     for key in ["GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL", "EMAIL"] {
         if let Some(value) = std::env::var(key)
@@ -596,16 +619,19 @@ fn preferred_git_user_email(user_name: &str) -> String {
         .unwrap_or_else(|| "local".to_string());
     format!("{user_name}@{host}.local")
 }
+
 #[derive(Clone, Debug)]
 struct GithubRemoteBootstrap {
     repo_name: String,
     uses_isolated_branch: bool,
 }
+
 #[derive(Clone, Debug)]
 struct ExistingGithubRemote {
     repo_name: String,
     remote_url: String,
 }
+
 fn ensure_lightweight_origin_remote(
     run: &CoordinationRun,
     task: &CoordinationTask,
@@ -720,6 +746,7 @@ fn ensure_lightweight_origin_remote(
         }
     }
 }
+
 fn github_cli_program() -> Option<String> {
     let program = std::env::var("AUTO_RUNS_GH_BIN")
         .ok()
@@ -728,6 +755,7 @@ fn github_cli_program() -> Option<String> {
         .unwrap_or_else(|| "gh".to_string());
     command_available(&program).then_some(program)
 }
+
 fn command_available(program: &str) -> bool {
     std::process::Command::new(program)
         .arg("--version")
@@ -735,6 +763,7 @@ fn command_available(program: &str) -> bool {
         .map(|output| output.status.success())
         .unwrap_or(false)
 }
+
 fn github_repo_name_for_workspace(workspace: &Path) -> String {
     let base = workspace
         .file_name()
@@ -754,6 +783,7 @@ fn github_repo_name_for_workspace(workspace: &Path) -> String {
         sanitized
     }
 }
+
 fn existing_github_remote_for_workspace(workspace: &Path) -> Result<Option<ExistingGithubRemote>> {
     for remote_name in git_remote_names(workspace)? {
         if remote_name == "github" {
@@ -772,6 +802,7 @@ fn existing_github_remote_for_workspace(workspace: &Path) -> Result<Option<Exist
     }
     Ok(None)
 }
+
 fn github_repo_name_from_remote_url(remote_url: &str) -> Option<String> {
     let trimmed = remote_url.trim().trim_end_matches('/');
     let path = if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
@@ -796,6 +827,7 @@ fn github_repo_name_from_remote_url(remote_url: &str) -> Option<String> {
     }
     Some(name.to_string())
 }
+
 fn gh_repo_create(
     workspace: &Path,
     gh_program: &str,
@@ -815,6 +847,7 @@ fn gh_repo_create(
         ],
     )
 }
+
 fn gh_repo_attach_existing(
     workspace: &Path,
     gh_program: &str,
@@ -830,6 +863,7 @@ fn gh_repo_attach_existing(
     )?;
     set_remote_url(workspace, remote_name, &remote_url)
 }
+
 fn set_remote_url(workspace: &Path, remote_name: &str, remote_url: &str) -> Result<()> {
     if git_remote_url(workspace, remote_name)?.is_some() {
         run_git_command(workspace, &["remote", "set-url", remote_name, remote_url])
@@ -837,15 +871,18 @@ fn set_remote_url(workspace: &Path, remote_name: &str, remote_url: &str) -> Resu
         run_git_command(workspace, &["remote", "add", remote_name, remote_url])
     }
 }
+
 fn remove_remote_if_present(workspace: &Path, remote_name: &str) -> Result<()> {
     if git_remote_url(workspace, remote_name)?.is_some() {
         run_git_command(workspace, &["remote", "remove", remote_name])?;
     }
     Ok(())
 }
+
 fn run_git_command(root: &Path, args: &[&str]) -> Result<()> {
     run_command(root, "git", args)
 }
+
 fn run_command(root: &Path, program: &str, args: &[&str]) -> Result<()> {
     let output = std::process::Command::new(program)
         .args(args)
@@ -870,6 +907,7 @@ fn run_command(root: &Path, program: &str, args: &[&str]) -> Result<()> {
     }
     Ok(())
 }
+
 fn command_stdout(root: &Path, program: &str, args: &[&str]) -> Result<String> {
     let output = std::process::Command::new(program)
         .args(args)
@@ -894,6 +932,7 @@ fn command_stdout(root: &Path, program: &str, args: &[&str]) -> Result<String> {
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
+
 fn git_remote_names(root: &Path) -> Result<Vec<String>> {
     let output = std::process::Command::new("git")
         .args(["remote"])
@@ -914,6 +953,7 @@ fn git_remote_names(root: &Path) -> Result<Vec<String>> {
         .map(ToOwned::to_owned)
         .collect())
 }
+
 fn git_config_value(root: &Path, key: &str) -> Result<Option<String>> {
     let output = std::process::Command::new("git")
         .args(["config", "--get", key])
@@ -930,6 +970,7 @@ fn git_config_value(root: &Path, key: &str) -> Result<Option<String>> {
         Ok(Some(value))
     }
 }
+
 fn git_remote_url(root: &Path, remote_name: &str) -> Result<Option<String>> {
     let output = std::process::Command::new("git")
         .args(["remote", "get-url", remote_name])
@@ -952,6 +993,7 @@ fn git_remote_url(root: &Path, remote_name: &str) -> Result<Option<String>> {
         Ok(Some(value))
     }
 }
+
 fn ensure_isolated_lightweight_branch(workspace: &Path) -> Result<String> {
     if let Some(current_branch) = git_current_branch(workspace)? {
         if current_branch.starts_with("auto-runs-") {
@@ -963,6 +1005,7 @@ fn ensure_isolated_lightweight_branch(workspace: &Path) -> Result<String> {
     run_git_command(workspace, &["checkout", "--orphan", branch.as_str()])?;
     Ok(branch)
 }
+
 fn git_current_branch(root: &Path) -> Result<Option<String>> {
     let output = std::process::Command::new("git")
         .args(["symbolic-ref", "--short", "HEAD"])
@@ -979,6 +1022,7 @@ fn git_current_branch(root: &Path) -> Result<Option<String>> {
         Ok(Some(value))
     }
 }
+
 fn next_auto_runs_branch_name(workspace: &Path) -> Result<String> {
     let mut max_suffix = 0usize;
 
@@ -1024,6 +1068,7 @@ fn next_auto_runs_branch_name(workspace: &Path) -> Result<String> {
 
     Ok(format!("auto-runs-{}", max_suffix + 1))
 }
+
 fn update_auto_runs_branch_suffix_max(branch: &str, max_suffix: &mut usize) {
     let Some(suffix) = branch.strip_prefix("auto-runs-") else {
         return;
@@ -1032,6 +1077,7 @@ fn update_auto_runs_branch_suffix_max(branch: &str, max_suffix: &mut usize) {
         *max_suffix = (*max_suffix).max(value);
     }
 }
+
 fn workspace_is_git_repo(root: &Path) -> bool {
     std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
@@ -1039,4 +1085,64 @@ fn workspace_is_git_repo(root: &Path) -> bool {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod scaffold_portability_tests {
+    use super::*;
+
+    #[test]
+    fn portable_scaffold_defaults_follow_the_current_home() {
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for (key, name, resolve) in [
+            (
+                "AUTO_RUNS_RUST_SCAFFOLD_ROOT",
+                "rust-project-scaffold",
+                rust_scaffold_root as fn() -> String,
+            ),
+            (
+                "AUTO_RUNS_ZIG_SCAFFOLD_ROOT",
+                "zig-project-scaffold",
+                zig_scaffold_root as fn() -> String,
+            ),
+        ] {
+            let previous = std::env::var_os(key);
+            std::env::remove_var(key);
+            let actual = resolve();
+            if let Some(value) = previous {
+                std::env::set_var(key, value);
+            }
+            let expected = dirs::home_dir().unwrap().join("git").join(name);
+            assert_eq!(PathBuf::from(actual), expected);
+        }
+    }
+
+    #[test]
+    fn portable_scaffold_explicit_overrides_take_precedence() {
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        for (key, resolve) in [
+            (
+                "AUTO_RUNS_RUST_SCAFFOLD_ROOT",
+                rust_scaffold_root as fn() -> String,
+            ),
+            (
+                "AUTO_RUNS_ZIG_SCAFFOLD_ROOT",
+                zig_scaffold_root as fn() -> String,
+            ),
+        ] {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, temp.path());
+            let actual = resolve();
+            match previous {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+            assert_eq!(PathBuf::from(actual), temp.path());
+        }
+    }
 }
