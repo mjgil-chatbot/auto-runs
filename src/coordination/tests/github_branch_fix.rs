@@ -1,5 +1,6 @@
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+
 #[test]
 fn github_branch_fix_notes_require_branch() {
     let notes = github_branch_fix_notes_with_settings("", "", 5);
@@ -7,6 +8,7 @@ fn github_branch_fix_notes_require_branch() {
         validate_github_branch_fix_notes(&notes).expect_err("branchless config should fail");
     assert!(error.to_string().contains("github_branch_fix_branch"));
 }
+
 #[test]
 fn github_branch_fix_seeds_branch_specific_single_worker_prompts() {
     let fixture = CoordinationTestFixture::named("github-branch-fix-seeding");
@@ -63,6 +65,7 @@ fn github_branch_fix_seeds_branch_specific_single_worker_prompts() {
     assert!(review.prompt.contains("feature/ci-fix"));
     assert!(!review.prompt.contains("task list"));
 }
+
 #[test]
 fn github_branch_fix_generated_tasks_ignore_provider_overrides() {
     let fixture = CoordinationTestFixture::named("github-branch-fix-provider");
@@ -118,6 +121,7 @@ fn github_branch_fix_generated_tasks_ignore_provider_overrides() {
     assert!(generated.prompt.contains("gh auth status"));
     assert!(generated.prompt.contains("gh api rate_limit"));
 }
+
 #[test]
 fn github_branch_fix_generated_write_contract_uses_lightweight_plaintext() {
     let fixture = CoordinationTestFixture::named("github-branch-fix-contract");
@@ -140,6 +144,7 @@ fn github_branch_fix_generated_write_contract_uses_lightweight_plaintext() {
     assert!(contract.contains("COMPLETED:"));
     assert!(!contract.contains("validate_autonomous_task_report.py"));
 }
+
 #[test]
 fn github_branch_fix_plan_contract_uses_plain_task_array() {
     let fixture = CoordinationTestFixture::named("github-branch-fix-plan-contract");
@@ -168,6 +173,7 @@ fn github_branch_fix_plan_contract_uses_plain_task_array() {
     assert!(!contract.contains("payload_kind"));
     assert!(!contract.contains("validate_autonomous_task_report.py"));
 }
+
 #[test]
 fn github_branch_fix_plan_tasks_skip_typed_contract_lookup() {
     let fixture = CoordinationTestFixture::named("github-branch-fix-plan-contract-lookup");
@@ -199,6 +205,7 @@ fn github_branch_fix_plan_tasks_skip_typed_contract_lookup() {
     assert!(lookup_contract_for_task(&plan_task).is_none());
     assert!(lookup_contract_for_task(&review_task).is_some());
 }
+
 #[test]
 fn github_branch_fix_review_contract_drops_task_list_requirements() {
     let fixture = CoordinationTestFixture::named("github-branch-fix-review-contract");
@@ -223,6 +230,7 @@ fn github_branch_fix_review_contract_drops_task_list_requirements() {
     assert!(!contract.contains("task-list document"));
     assert!(!contract.contains("next task-list"));
 }
+
 #[test]
 fn github_branch_fix_partial_review_with_failed_ci_synthesizes_wait_loop() {
     let fixture = CoordinationTestFixture::named("github-branch-fix-partial-review-loop");
@@ -289,6 +297,7 @@ fn github_branch_fix_partial_review_with_failed_ci_synthesizes_wait_loop() {
     assert_eq!(follow_up_review.dependencies, vec![wait_task.task_id.clone()]);
     assert_eq!(follow_up_review.status, CoordinationTaskStatus::Blocked);
 }
+
 fn github_branch_fix_workspace_bootstrap_recreates_missing_worktree() {
     let fixture = CoordinationTestFixture::named("github-branch-fix-workspace");
     init_git_repo(fixture.workspace.path());
@@ -334,6 +343,7 @@ fn github_branch_fix_workspace_bootstrap_recreates_missing_worktree() {
         "feature/ci-fix"
     );
 }
+
 #[test]
 fn github_branch_fix_upsert_accepts_existing_linked_worktree_as_is() {
     let fixture = CoordinationTestFixture::named("github-branch-fix-existing-worktree");
@@ -397,6 +407,7 @@ fn github_branch_fix_upsert_accepts_existing_linked_worktree_as_is() {
         .iter()
         .all(|task| task.cwd == snapshot.run.workspace_path));
 }
+
 #[test]
 fn github_branch_fix_upsert_accepts_note_only_config_and_forces_one_agent() {
     let fixture = CoordinationTestFixture::named("github-branch-fix-upsert");
@@ -450,6 +461,7 @@ fn github_branch_fix_upsert_accepts_note_only_config_and_forces_one_agent() {
         .iter()
         .all(|task| task.cwd == snapshot.run.workspace_path));
 }
+
 #[test]
 fn github_branch_fix_runs_on_same_branch_get_distinct_worktrees() {
     let fixture = CoordinationTestFixture::named("github-branch-fix-run-isolation");
@@ -519,6 +531,7 @@ fn github_branch_fix_runs_on_same_branch_get_distinct_worktrees() {
     assert!(std::path::Path::new(&first.run.workspace_path).is_dir());
     assert!(std::path::Path::new(&second.run.workspace_path).is_dir());
 }
+
 #[test]
 fn github_branch_fix_poll_timeout_requeues_without_consuming_attempt_budget() {
     let fixture = CoordinationTestFixture::named("github-branch-fix-timeout-retry");
@@ -576,6 +589,7 @@ fn github_branch_fix_poll_timeout_requeues_without_consuming_attempt_budget() {
     assert!(reloaded.claimed_by.is_none());
     assert!(!claim_path(&run.run_id, &task.task_id).exists());
 }
+
 #[test]
 fn github_branch_fix_input_rail_rejects_unauthenticated_gh_cli() {
     let fixture = CoordinationTestFixture::named("github-branch-fix-gh-auth");
@@ -602,6 +616,7 @@ fn github_branch_fix_input_rail_rejects_unauthenticated_gh_cli() {
     assert!(reason.contains("authenticated gh CLI access"));
     assert!(reason.contains("gh auth status"));
 }
+
 #[test]
 fn github_branch_fix_input_rail_falls_back_when_active_flag_is_unsupported() {
     let fixture = CoordinationTestFixture::named("github-branch-fix-gh-auth-fallback");
@@ -623,6 +638,7 @@ fn github_branch_fix_input_rail_falls_back_when_active_flag_is_unsupported() {
 
     assert!(matches!(check_input_rail(&run, &task), RailDecision::Allow));
 }
+
 #[test]
 fn github_branch_fix_completion_auto_publishes_materialized_changes() {
     let fixture = CoordinationTestFixture::named("github-branch-fix-publish");
@@ -653,6 +669,57 @@ fn github_branch_fix_completion_auto_publishes_materialized_changes() {
     assert_eq!(persisted.status, CoordinationTaskStatus::Completed);
     assert_eq!(local_head, remote_head);
 }
+
+#[test]
+fn github_branch_fix_publish_failure_requeues_same_task_for_repair() {
+    let fixture = CoordinationTestFixture::named("github-branch-fix-publish-retry");
+    let mut run = fixture.make_run(AutonomousWorkflowMode::GithubBranchFix);
+    run.notes = github_branch_fix_notes_with_settings("", "main", 5);
+    let _remote_path = init_git_repo_with_remote(fixture.workspace.path());
+    let mut task = lightweight_running_write_task(&fixture, &run, "codex");
+    task.title = "Repair CI workflow".to_string();
+    persist_claimed_task(&fixture, &run, &task, "codex");
+
+    let hook_path = fixture.workspace.path().join(".git/hooks/pre-commit");
+    std::fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &hook_path,
+        "#!/bin/sh\necho '[hook] shim header compatibility' >&2\nexit 1\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&hook_path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&hook_path, permissions).unwrap();
+
+    std::fs::write(
+        fixture.workspace.path().join("src/lib.rs"),
+        "pub fn sample() { println!(\"github branch fix retry\"); }\n",
+    )
+    .unwrap();
+
+    complete_task(
+        &run.run_id,
+        &task.task_id,
+        71,
+        lightweight_success_artifact(&run, &task),
+    )
+    .unwrap();
+
+    let reloaded = load_task(&run.run_id, &task.task_id).unwrap();
+    let persisted_run = load_run(&run.run_id).unwrap();
+
+    assert_eq!(reloaded.status, CoordinationTaskStatus::Queued);
+    assert!(reloaded.claimed_by.is_none());
+    assert!(reloaded.prompt.contains("Git publish recovery context:"));
+    assert!(reloaded.prompt.contains("[hook] shim header compatibility"));
+    assert!(reloaded
+        .artifact_summary
+        .as_deref()
+        .is_some_and(|summary| summary.contains("[git_publish_failed]")));
+    assert_eq!(persisted_run.status, CoordinationRunStatus::Active);
+    assert!(!claim_path(&run.run_id, &task.task_id).exists());
+}
+
 #[test]
 fn github_branch_fix_publish_recovery_can_push_existing_local_commit() {
     let fixture = CoordinationTestFixture::named("github-branch-fix-publish-resume");

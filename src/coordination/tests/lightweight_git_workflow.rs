@@ -7,6 +7,7 @@ fn run_git(workspace: &std::path::Path, args: &[&str]) -> String {
     assert!(output.status.success(), "git {:?} should succeed", args);
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
+
 fn init_git_repo(workspace: &std::path::Path) {
     run_git(workspace, &["init", "-b", "main"]);
     run_git(workspace, &["config", "user.name", "Test User"]);
@@ -14,6 +15,7 @@ fn init_git_repo(workspace: &std::path::Path) {
     run_git(workspace, &["add", "src/lib.rs"]);
     run_git(workspace, &["commit", "-m", "initial"]);
 }
+
 fn init_git_repo_with_remote(workspace: &std::path::Path) -> std::path::PathBuf {
     let remote_path = workspace.join(".test-remote.git");
     std::fs::create_dir_all(&remote_path).unwrap();
@@ -28,6 +30,7 @@ fn init_git_repo_with_remote(workspace: &std::path::Path) -> std::path::PathBuf 
     run_git(&remote_path, &["symbolic-ref", "HEAD", "refs/heads/main"]);
     remote_path
 }
+
 fn lightweight_running_write_task(
     fixture: &CoordinationTestFixture,
     run: &CoordinationRun,
@@ -51,6 +54,7 @@ fn lightweight_running_write_task(
 
     task
 }
+
 fn persist_claimed_task(
     fixture: &CoordinationTestFixture,
     run: &CoordinationRun,
@@ -76,6 +80,7 @@ fn persist_claimed_task(
     })
     .unwrap());
 }
+
 fn lightweight_success_artifact(run: &CoordinationRun, task: &CoordinationTask) -> TaskArtifact {
     TaskArtifact {
         run_id: run.run_id.clone(),
@@ -95,6 +100,7 @@ fn lightweight_success_artifact(run: &CoordinationRun, task: &CoordinationTask) 
         },
     }
 }
+
 #[test]
 fn lightweight_completion_publishes_to_current_auto_runs_branch() {
     let fixture = CoordinationTestFixture::named("lightweight-git-auto-runs-branch");
@@ -131,11 +137,13 @@ fn lightweight_completion_publishes_to_current_auto_runs_branch() {
         remote_main_before
     );
 }
+
 struct SequentialSameFilePublishOutcome {
     remote_log: String,
     remote_commit_message: String,
     remote_final: String,
 }
+
 fn run_sequential_same_file_publish_scenario(
     label: &str,
     first_provider: &str,
@@ -180,6 +188,7 @@ fn run_sequential_same_file_publish_scenario(
         remote_final: run_git(&remote_path, &["show", "HEAD:src/lib.rs"]),
     }
 }
+
 #[test]
 fn lightweight_generated_write_tasks_use_runtime_git_publish() {
     // The task PLANNER (task splitter) is told to set title = exact git commit message.
@@ -235,6 +244,7 @@ fn lightweight_generated_write_tasks_use_runtime_git_publish() {
     assert!(!contract.contains("Git commit: <commit-hash>"));
     assert!(!contract.contains("Git push: pushed"));
 }
+
 #[test]
 fn reconciler_publishes_deferred_lightweight_write_completion() {
     let fixture = CoordinationTestFixture::named("lightweight-git-reconciler-publish");
@@ -291,6 +301,10 @@ fn reconciler_publishes_deferred_lightweight_write_completion() {
         "pub fn sample() -> &'static str { \"reconciled\" }"
     );
 }
+
+// COORDINATOR: patch-level publish applies worker changes to latest branch head,
+// commits with task.title as message, and pushes to origin. The fixture workspace
+// (worker's sandbox) is not where the commit lands — the remote receives it.
 #[test]
 fn lightweight_completion_auto_publishes_materialized_changes() {
     let fixture = CoordinationTestFixture::named("lightweight-git-auto-publish");
@@ -326,6 +340,8 @@ fn lightweight_completion_auto_publishes_materialized_changes() {
     // The new commit is on origin/main
     assert!(!remote_head.is_empty());
 }
+
+// COORDINATOR: bootstrapped workspace still gets commit+push from task title.
 #[test]
 fn lightweight_completion_auto_publishes_from_bootstrapped_workspace() {
     let fixture = CoordinationTestFixture::named("lightweight-git-bootstrap-publish");
@@ -363,6 +379,7 @@ fn lightweight_completion_auto_publishes_from_bootstrapped_workspace() {
     assert_eq!(remotes, "origin");
     assert!(origin_path.starts_with(remote_root.path().to_str().unwrap()));
 }
+
 #[test]
 fn lightweight_completion_keeps_remote_publishable_after_sequential_publishes_without_resetting_workspace(
 ) {
@@ -418,6 +435,81 @@ fn lightweight_completion_keeps_remote_publishable_after_sequential_publishes_wi
     );
     assert_eq!(remote_commit_message, "Second publish");
 }
+
+#[test]
+fn lightweight_publish_failure_stays_deferred_after_reconcile_attempt() {
+    let fixture = CoordinationTestFixture::named("lightweight-git-publish-retry");
+    let run = fixture.make_run(AutonomousWorkflowMode::LightweightImplementation);
+    let remote_path = init_git_repo_with_remote(fixture.workspace.path());
+    let hook_path = remote_path.join("hooks/pre-receive");
+    // Test fixtures own their directories even when Git templates are disabled.
+    std::fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &hook_path,
+        "#!/bin/sh\necho 'remote: fatal error in commit_refs' >&2\nexit 1\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = std::fs::metadata(&hook_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&hook_path, permissions).unwrap();
+    }
+
+    let mut task = lightweight_running_write_task(&fixture, &run, "minimax");
+    task.title = "Repair push blocker".to_string();
+    persist_claimed_task(&fixture, &run, &task, "minimax");
+
+    std::fs::write(
+        fixture.workspace.path().join("src/lib.rs"),
+        "pub fn sample() { println!(\"retry me\"); }\n",
+    )
+    .unwrap();
+
+    complete_task(
+        &run.run_id,
+        &task.task_id,
+        71,
+        lightweight_success_artifact(&run, &task),
+    )
+    .unwrap();
+
+    let reloaded = load_task(&run.run_id, &task.task_id).unwrap();
+    let persisted_run = load_run(&run.run_id).unwrap();
+
+    assert_eq!(reloaded.status, CoordinationTaskStatus::Completed);
+    assert_eq!(
+        reloaded.recovery_action,
+        Some(TaskRecoveryAction::RetryPublish)
+    );
+    assert_eq!(reloaded.failure_kind, Some(TaskFailureKind::Publish));
+    assert!(reloaded.claimed_by.is_none());
+    assert_eq!(persisted_run.status, CoordinationRunStatus::Completed);
+    assert!(!claim_path(&run.run_id, &task.task_id).exists());
+
+    reconcile_run_state(&run.run_id).unwrap();
+
+    let reloaded = load_task(&run.run_id, &task.task_id).unwrap();
+
+    assert_eq!(reloaded.status, CoordinationTaskStatus::Completed);
+    assert!(reloaded.claimed_by.is_none());
+    assert_eq!(
+        reloaded.recovery_action,
+        Some(TaskRecoveryAction::RetryPublish)
+    );
+    assert!(reloaded.publish_attempt_count >= 1);
+    assert!(reloaded
+        .artifact_summary
+        .as_deref()
+        .is_some_and(|summary| summary.contains("Deferred git publish failed")));
+    assert!(reloaded
+        .artifact_summary
+        .as_deref()
+        .is_some_and(|summary| summary.contains("remote: fatal error in commit_refs")));
+}
+
 /// Regression test: reconcile_deferred_lightweight_publish must not increment
 /// publish_attempt_count when it does not actually attempt a publish (e.g., when
 /// the reconciler is called multiple times while the run is still active and
@@ -468,6 +560,7 @@ fn reconcile_deferred_lightweight_publish_does_not_increment_count_on_skipped_ca
     // The initial publish succeeded; later reconciliation has nothing to retry.
     assert_eq!(reloaded.recovery_action, None);
 }
+
 #[test]
 fn lightweight_completion_merges_same_file_fix_after_broken_publish() {
     let outcome = run_sequential_same_file_publish_scenario(
@@ -487,6 +580,7 @@ fn lightweight_completion_merges_same_file_fix_after_broken_publish() {
     assert!(outcome.remote_final.contains("println!(\"fixed\")"));
     assert!(!outcome.remote_final.contains("broken worker output"));
 }
+
 #[test]
 fn lightweight_completion_can_rebreak_same_file_after_a_correct_publish() {
     let outcome = run_sequential_same_file_publish_scenario(
@@ -503,6 +597,7 @@ fn lightweight_completion_can_rebreak_same_file_after_a_correct_publish() {
     assert!(outcome.remote_final.contains("panic!(\"regression\")"));
     assert!(!outcome.remote_final.contains("println!(\"green\")"));
 }
+
 #[test]
 fn lightweight_completion_preserves_non_overlapping_same_file_changes_across_publishes() {
     let outcome = run_sequential_same_file_publish_scenario(
@@ -518,6 +613,7 @@ fn lightweight_completion_preserves_non_overlapping_same_file_changes_across_pub
     assert!(outcome.remote_final.contains("println!(\"second\")"));
     assert!(outcome.remote_final.contains("pub fn helper()"));
 }
+
 #[test]
 fn lightweight_completion_uses_latest_same_line_edit_for_follow_up_publish() {
     let outcome = run_sequential_same_file_publish_scenario(
@@ -533,6 +629,7 @@ fn lightweight_completion_uses_latest_same_line_edit_for_follow_up_publish() {
     assert!(outcome.remote_final.contains("println!(\"v2\")"));
     assert!(!outcome.remote_final.contains("println!(\"v1\")"));
 }
+
 #[test]
 fn lightweight_completion_preserves_multiline_commit_message_for_same_file_follow_up() {
     let outcome = run_sequential_same_file_publish_scenario(
@@ -550,6 +647,7 @@ fn lightweight_completion_preserves_multiline_commit_message_for_same_file_follo
         "Fix sample output\nUpdate checklist"
     );
 }
+
 #[test]
 fn lightweight_completion_keeps_remote_publish_order_stable_after_mixed_provider_sequence() {
     let outcome = run_sequential_same_file_publish_scenario(
@@ -567,6 +665,7 @@ fn lightweight_completion_keeps_remote_publish_order_stable_after_mixed_provider
         "Second provider change\nFirst provider change"
     );
 }
+
 #[test]
 fn lightweight_completion_limits_publish_to_materialized_files() {
     let fixture = CoordinationTestFixture::named("lightweight-git-materialized-only");
@@ -599,6 +698,7 @@ fn lightweight_completion_limits_publish_to_materialized_files() {
     let remote_tree = run_git(&remote_path, &["ls-tree", "-r", "--name-only", "HEAD"]);
     assert!(!remote_tree.lines().any(|line| line == "src/helper.rs"));
 }
+
 #[test]
 fn lightweight_completion_excludes_build_outputs_and_large_untracked_files_from_publish() {
     let fixture = CoordinationTestFixture::named("lightweight-git-publish-filter");
@@ -639,6 +739,8 @@ fn lightweight_completion_excludes_build_outputs_and_large_untracked_files_from_
     assert!(!remote_tree.lines().any(|line| line.starts_with("target/")));
     assert!(!remote_tree.lines().any(|line| line == "tmp-dump.log"));
 }
+
+// COORDINATOR: lightweight write completion is recorded first; failed publish remains deferred until repaired or retried.
 #[test]
 fn lightweight_completion_keeps_retry_publish_state_when_reconciler_cannot_push() {
     let fixture = CoordinationTestFixture::named("lightweight-git-auto-publish-fail");
@@ -693,6 +795,7 @@ fn lightweight_completion_keeps_retry_publish_state_when_reconciler_cannot_push(
         .as_deref()
         .is_some_and(|summary| summary.contains("Deferred git publish failed")));
 }
+
 #[test]
 fn lightweight_publish_repair_task_does_not_spawn_nested_publish_repair() {
     let fixture = CoordinationTestFixture::named("lightweight-git-no-nested-publish-repair");
@@ -750,6 +853,7 @@ fn lightweight_publish_repair_task_does_not_spawn_nested_publish_repair() {
         0
     );
 }
+
 #[test]
 fn publish_tracks_its_base_preserving_head_index_and_workspace() {
     let fixture = CoordinationTestFixture::named("publish-preserves-index-and-workspace");
@@ -817,6 +921,7 @@ fn publish_tracks_its_base_preserving_head_index_and_workspace() {
     );
     assert!(!run_git(&remote, &["ls-tree", "--name-only", "HEAD"]).contains("staged-note.txt"));
 }
+
 #[test]
 fn publish_preserves_a_divergent_local_branch_head() {
     let fixture = CoordinationTestFixture::named("publish-preserves-local-commits");
@@ -853,6 +958,7 @@ fn publish_preserves_a_divergent_local_branch_head() {
     );
     assert!(run_git(&remote, &["show", "HEAD:src/lib.rs"]).contains("published"));
 }
+
 #[test]
 fn publish_rejects_external_conflict_after_unrelated_local_publish() {
     let fixture = CoordinationTestFixture::named("publish-external-conflict-boundary");
